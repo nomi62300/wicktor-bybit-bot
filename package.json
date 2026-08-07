@@ -1,0 +1,20 @@
+{
+  "name": "wicktor-bybit-bot",
+  "version": "1.0.0",
+  "description": "24/7 headless Bybit Demo USDT Perpetual trading bot with continuation-bias signal engine",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "bybit-api": "^3.10.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
