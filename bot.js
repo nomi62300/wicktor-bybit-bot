@@ -50,8 +50,11 @@ const { scoreSignal } = require('./engine/scoring');
 const { getLatestJaw, calcHeikinAshi, calcAlligatorJaw } = require('./engine/indicators');
 
 // ── Environment ───────────────────────────────────────────────────────────────
-const API_KEY    = process.env.BYBIT_DEMO_API_KEY    || '';
-const API_SECRET = process.env.BYBIT_DEMO_API_SECRET || '';
+const apiKey = (process.env.BYBIT_DEMO_API_KEY || '').trim();
+console.log(`[INIT] Loaded Bybit Key: ${apiKey ? apiKey.slice(0, 4) + '...' + apiKey.slice(-4) : 'MISSING'}`);
+
+const API_KEY    = apiKey;
+const API_SECRET = (process.env.BYBIT_DEMO_API_SECRET || '').trim();
 const PORT       = parseInt(process.env.PORT ?? '3000', 10);
 
 if (!API_KEY || !API_SECRET) {
@@ -60,11 +63,14 @@ if (!API_KEY || !API_SECRET) {
 }
 
 // ── Bybit Client (Demo mode) ──────────────────────────────────────────────────
-const client = new RestClientV5({
-  key    : API_KEY,
-  secret : API_SECRET,
-  demo   : true,          // Bybit Demo Trading environment
+const restClient = new RestClientV5({
+  key: (process.env.BYBIT_DEMO_API_KEY || '').trim(),
+  secret: (process.env.BYBIT_DEMO_API_SECRET || '').trim(),
+  demoTrading: true,  // Forces SDK to connect to api-demo.bybit.com
+  testnet: false,
+  recv_window: 10000
 });
+const client = restClient;
 
 // ── Trading Parameters ────────────────────────────────────────────────────────
 const VIRTUAL_CAPITAL_INITIAL = 100.0;        // USDT
@@ -589,7 +595,7 @@ async function boot() {
   log('BOOT', '🚀 Wicktor Bybit Demo Bot starting…');
   log('BOOT', `VirtualCapital: $${virtualCapital.toFixed(2)} | Risk/Trade: ${(RISK_PCT * 100).toFixed(1)}% | Leverage: ${LEVERAGE}x`);
   log('BOOT', `MaxPositions: ${MAX_POSITIONS} | ScanInterval: ${SCAN_INTERVAL_MS / 60000} min`);
-  log('BOOT', `API Key: ${API_KEY.slice(0, 6)}… | Demo: true`);
+  log('BOOT', `API Key: ${API_KEY ? API_KEY.slice(0, 4) + '...' + API_KEY.slice(-4) : 'MISSING'} | Demo: true`);
   logDivider();
 
   // Test connectivity
