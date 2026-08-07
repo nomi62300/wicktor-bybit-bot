@@ -113,6 +113,7 @@ let virtualCapital = VIRTUAL_CAPITAL_INITIAL;
  * }
  */
 const activePositions = new Map();
+const tradeHistory = [];
 
 // ── Logging Helpers ───────────────────────────────────────────────────────────
 
@@ -147,6 +148,290 @@ app.get('/health', (_req, res) => {
     timestamp       : new Date().toISOString(),
   });
 });
+
+app.get('/performance', (_req, res) => {
+  const total = tradeHistory.length;
+  
+  // Calculate total wins (PnL > 0)
+  const wins = tradeHistory.filter(t => t.realizedPnl > 0).length;
+  const overallWinRate = total > 0 ? ((wins / total) * 100).toFixed(2) : '0.00';
+  const totalPnl = tradeHistory.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  // Quality Band Splits
+  const excellentTrades = tradeHistory.filter(t => t.qualityBand === 'EXCELLENT');
+  const watchTrades = tradeHistory.filter(t => t.qualityBand === 'WATCH');
+  
+  const excellentWins = excellentTrades.filter(t => t.realizedPnl > 0).length;
+  const excellentWinRate = excellentTrades.length > 0 ? ((excellentWins / excellentTrades.length) * 100).toFixed(2) : '0.00';
+  const excellentPnl = excellentTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  const watchWins = watchTrades.filter(t => t.realizedPnl > 0).length;
+  const watchWinRate = watchTrades.length > 0 ? ((watchWins / watchTrades.length) * 100).toFixed(2) : '0.00';
+  const watchPnl = watchTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  // Timeframe Splits
+  const m5Trades = tradeHistory.filter(t => t.timeframe === '5M');
+  const m15Trades = tradeHistory.filter(t => t.timeframe === '15M');
+
+  const m5Wins = m5Trades.filter(t => t.realizedPnl > 0).length;
+  const m5WinRate = m5Trades.length > 0 ? ((m5Wins / m5Trades.length) * 100).toFixed(2) : '0.00';
+  const m5Pnl = m5Trades.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  const m15Wins = m15Trades.filter(t => t.realizedPnl > 0).length;
+  const m15WinRate = m15Trades.length > 0 ? ((m15Wins / m15Trades.length) * 100).toFixed(2) : '0.00';
+  const m15Pnl = m15Trades.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  // Exit Reason Breakdown
+  const exitReasons = {
+    'STOP_LOSS_HIT': 0,
+    'JAW_INVALIDATION': 0,
+    'TP_1.25R_PARTIAL': 0,
+    'TP_2.0R_FINAL': 0
+  };
+  tradeHistory.forEach(t => {
+    if (exitReasons[t.exitReason] !== undefined) {
+      exitReasons[t.exitReason]++;
+    }
+  });
+
+  // Render HTML response with modern styling
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <title>Wicktor Bot Performance Journal</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          background-color: #0d1117;
+          color: #c9d1d9;
+          margin: 0;
+          padding: 40px 20px;
+        }
+        .container {
+          max-width: 900px;
+          margin: 0 auto;
+        }
+        h1 {
+          color: #58a6ff;
+          border-bottom: 1px solid #21262d;
+          padding-bottom: 10px;
+          font-weight: 500;
+        }
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+          gap: 20px;
+          margin-bottom: 40px;
+        }
+        .card {
+          background-color: #161b22;
+          border: 1px solid #30363d;
+          border-radius: 6px;
+          padding: 20px;
+        }
+        .card h3 {
+          margin-top: 0;
+          color: #8b949e;
+          font-size: 14px;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+        }
+        .card .value {
+          font-size: 32px;
+          font-weight: bold;
+          color: #f0f6fc;
+        }
+        .card .subtext {
+          font-size: 14px;
+          color: #8b949e;
+          margin-top: 5px;
+        }
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-bottom: 40px;
+          background-color: #161b22;
+          border: 1px solid #30363d;
+          border-radius: 6px;
+          overflow: hidden;
+        }
+        th, td {
+          padding: 12px 15px;
+          text-align: left;
+          border-bottom: 1px solid #30363d;
+        }
+        th {
+          background-color: #21262d;
+          color: #f0f6fc;
+          font-weight: 500;
+        }
+        tr:last-child td {
+          border-bottom: none;
+        }
+        .pnl-positive {
+          color: #3fb950;
+        }
+        .pnl-negative {
+          color: #f85149;
+        }
+        .btn {
+          display: inline-block;
+          background-color: #238636;
+          color: #ffffff;
+          padding: 10px 20px;
+          border-radius: 6px;
+          text-decoration: none;
+          font-weight: 500;
+          transition: background-color 0.2s;
+        }
+        .btn:hover {
+          background-color: #2ea043;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>Wicktor Bot Performance Analytics</h1>
+        
+        <div class="stats-grid">
+          <div class="card">
+            <h3>Overall Overview</h3>
+            <div class="value">${total}</div>
+            <div class="subtext">Total Executed Trades</div>
+          </div>
+          <div class="card">
+            <h3>Overall Win Rate</h3>
+            <div class="value">${overallWinRate}%</div>
+            <div class="subtext">${wins} Wins / ${total - wins} Losses</div>
+          </div>
+          <div class="card">
+            <h3>Total Realized PnL</h3>
+            <div class="value ${totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${totalPnl.toFixed(4)}</div>
+            <div class="subtext">Accumulated USDT</div>
+          </div>
+        </div>
+
+        <h2>Quality Band Performance</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Band</th>
+              <th>Trades Count</th>
+              <th>Win Rate</th>
+              <th>Realized PnL</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>EXCELLENT</strong></td>
+              <td>${excellentTrades.length}</td>
+              <td>${excellentWinRate}%</td>
+              <td class="${excellentPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${excellentPnl.toFixed(4)}</td>
+            </tr>
+            <tr>
+              <td><strong>WATCH</strong></td>
+              <td>${watchTrades.length}</td>
+              <td>${watchWinRate}%</td>
+              <td class="${watchPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${watchPnl.toFixed(4)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Timeframe Performance</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Timeframe</th>
+              <th>Trades Count</th>
+              <th>Win Rate</th>
+              <th>Realized PnL</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>5M</strong></td>
+              <td>${m5Trades.length}</td>
+              <td>${m5WinRate}%</td>
+              <td class="${m5Pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${m5Pnl.toFixed(4)}</td>
+            </tr>
+            <tr>
+              <td><strong>15M (Fallback)</strong></td>
+              <td>${m15Trades.length}</td>
+              <td>${m15WinRate}%</td>
+              <td class="${m15Pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${m15Pnl.toFixed(4)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Exit Distribution</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Exit Reason</th>
+              <th>Count</th>
+              <th>Percentage</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Stop Loss Hit</td>
+              <td>${exitReasons['STOP_LOSS_HIT']}</td>
+              <td>${total > 0 ? ((exitReasons['STOP_LOSS_HIT'] / total) * 100).toFixed(1) : 0}%</td>
+            </tr>
+            <tr>
+              <td>Jaw Invalidation (Early Exit)</td>
+              <td>${exitReasons['JAW_INVALIDATION']}</td>
+              <td>${total > 0 ? ((exitReasons['JAW_INVALIDATION'] / total) * 100).toFixed(1) : 0}%</td>
+            </tr>
+            <tr>
+              <td>Take Profit 1 (1.25R Partial)</td>
+              <td>${exitReasons['TP_1.25R_PARTIAL']}</td>
+              <td>${total > 0 ? ((exitReasons['TP_1.25R_PARTIAL'] / total) * 100).toFixed(1) : 0}%</td>
+            </tr>
+            <tr>
+              <td>Take Profit 2 (2.0R Final)</td>
+              <td>${exitReasons['TP_2.0R_FINAL']}</td>
+              <td>${total > 0 ? ((exitReasons['TP_2.0R_FINAL'] / total) * 100).toFixed(1) : 0}%</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div style="margin-top: 30px; text-align: center;">
+          <a href="/trades.csv" class="btn">Download Excel-Compatible CSV Journal</a>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+  res.send(html);
+});
+
+app.get('/trades.csv', (_req, res) => {
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename=wicktor_trades.csv');
+  
+  const csvData = convertToCSV(tradeHistory);
+  res.send(csvData);
+});
+
+function convertToCSV(arr) {
+  const headers = ['Timestamp', 'Symbol', 'Side', 'QualityBand', 'Timeframe', 'EntryPrice', 'ExitPrice', 'ExitReason', 'RealizedPnL', 'R_Multiple'];
+  const rows = arr.map(t => [
+    t.timestamp,
+    t.symbol,
+    t.side,
+    t.qualityBand,
+    t.timeframe,
+    t.entryPrice,
+    t.exitPrice,
+    t.exitReason,
+    t.realizedPnl.toFixed(4),
+    t.rMultiple.toFixed(4)
+  ]);
+  return [headers.join(','), ...rows.map(r => r.map(val => `"${val}"`).join(','))].join('\n');
+}
 
 app.get('/', (_req, res) => {
   res.json({ name: 'Wicktor Bybit Bot', status: 'running' });
@@ -284,6 +569,21 @@ async function executePartialClose(pos, livePrice) {
   pos.breakevenSet= true;
   pos.status      = 'PARTIAL';
 
+  // Add to trade journal
+  const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
+  tradeHistory.push({
+    timestamp   : new Date().toISOString(),
+    symbol      : pos.symbol,
+    side        : pos.side,
+    qualityBand : pos.qualityBand || pos.band || 'WATCH',
+    timeframe   : pos.timeframe || '5M',
+    entryPrice  : pos.entryPrice,
+    exitPrice   : livePrice,
+    exitReason  : 'TP_1.25R_PARTIAL',
+    realizedPnl : pnl,
+    rMultiple   : parseFloat(rMultiple.toFixed(4))
+  });
+
   log('TP1', `💰 PnL +$${pnl.toFixed(4)} | RemainQty=${pos.remainQty.toFixed(6)} | SL→Breakeven`);
   logPnL();
 }
@@ -321,6 +621,21 @@ async function executeFullClose(pos, reason, livePrice) {
   pos.status      = 'CLOSED';
   activePositions.delete(pos.symbol);
 
+  // Add to trade journal
+  const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
+  tradeHistory.push({
+    timestamp   : new Date().toISOString(),
+    symbol      : pos.symbol,
+    side        : pos.side,
+    qualityBand : pos.qualityBand || pos.band || 'WATCH',
+    timeframe   : pos.timeframe || '5M',
+    entryPrice  : pos.entryPrice,
+    exitPrice   : livePrice,
+    exitReason  : 'TP_2.0R_FINAL',
+    realizedPnl : pnl,
+    rMultiple   : parseFloat(rMultiple.toFixed(4))
+  });
+
   log(reason, `💰 Closed ${pos.symbol} | PnL +$${pnl.toFixed(4)} | orderId=${orderId}`);
   logPnL();
 }
@@ -356,6 +671,25 @@ async function executeExit(pos, reason, livePrice, refLevel) {
   virtualCapital += pnl;
   pos.status      = 'CLOSED';
   activePositions.delete(pos.symbol);
+
+  // Add to trade journal
+  let loggedReason = 'STOP_LOSS_HIT';
+  if (reason === 'JAW_INVALIDATION') loggedReason = 'JAW_INVALIDATION';
+  if (reason === 'STOP_LOSS') loggedReason = 'STOP_LOSS_HIT';
+
+  const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
+  tradeHistory.push({
+    timestamp   : new Date().toISOString(),
+    symbol      : pos.symbol,
+    side        : pos.side,
+    qualityBand : pos.qualityBand || pos.band || 'WATCH',
+    timeframe   : pos.timeframe || '5M',
+    entryPrice  : pos.entryPrice,
+    exitPrice   : livePrice,
+    exitReason  : loggedReason,
+    realizedPnl : pnl,
+    rMultiple   : parseFloat(rMultiple.toFixed(4))
+  });
 
   const pnlSign = pnl >= 0 ? '+' : '';
   log(reason, `🚪 Exit ${pos.symbol} @ ${livePrice} | refLevel=${refLevel?.toFixed(4)} | PnL ${pnlSign}$${pnl.toFixed(4)} | orderId=${orderId}`);
@@ -446,12 +780,14 @@ async function evaluateSymbol(symbol) {
 
   // Score the signal
   let signal = scoreSignal(candles5m);
+  let timeframe = '5M';
 
   // 15M fallback if 5M direction is unclear
   if (signal.direction === null || signal.band === 'AVOID') {
     const candles15m = await getKlines(symbol, '15', 200);
     if (candles15m && candles15m.length >= 60) {
       signal = scoreSignal(candles5m, candles15m);
+      timeframe = '15M';
     }
   }
 
@@ -475,6 +811,7 @@ async function evaluateSymbol(symbol) {
   // Filter 5: SL must be valid
   if (!signal.slPrice || !signal.entryPrice) return null;
 
+  signal.timeframe = timeframe;
   return { symbol, signal };
 }
 
@@ -542,8 +879,14 @@ async function enterPosition(symbol, signal) {
   const posState = {
     symbol          : symbol,
     side            : signal.direction,
+    qualityBand     : signal.band,
+    timeframe       : signal.timeframe || '5M',
     entryPrice      : signal.entryPrice,
+    entryTime       : Date.now(),
     slPrice         : signal.slPrice,
+    tpPrice         : parseFloat((signal.entryPrice + (signal.direction === 'Buy' ? 1 : -1) * slDistance * TP2_R).toFixed(6)),
+    
+    // Existing tracking fields:
     jawValue        : signal.jawValue,
     slDistance,
     totalQty        : positionQty,
