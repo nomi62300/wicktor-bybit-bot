@@ -74,7 +74,7 @@ const client = restClient;
 
 // ── Trading Parameters ────────────────────────────────────────────────────────
 const VIRTUAL_CAPITAL_INITIAL = 100.0;        // USDT
-const RISK_PCT                = 0.005;        // 0.5% per trade
+const RISK_PCT                = 0.0015;        // 0.15% risk per trade
 const LEVERAGE                = 5;            // 5x forced leverage
 const MAX_POSITIONS           = 20;           // max concurrent open positions
 const SCAN_INTERVAL_MS        = 3 * 60_000;   // 3 minutes
@@ -501,15 +501,27 @@ async function enterPosition(symbol, signal) {
   }
 
   // ── Order Size Calculation ───────────────────────────────────────────────
-  const riskAmount   = virtualCapital * RISK_PCT;    // $0.50 base (grows with capital)
-  const slDistance   = Math.abs(signal.entryPrice - signal.slPrice);
+  const accountBalance = virtualCapital;
+  const riskAmount     = accountBalance * RISK_PCT;           // 0.15% risk per trade
+  const maxNotionalCap = accountBalance * 0.12;               // 12% max position value cap per coin
+  const minSlPct       = 0.006;                              // 0.6% minimum stop loss distance floor
+
+  const entryPrice = signal.entryPrice;
+  const slPrice    = signal.slPrice;
+  const slDistance = Math.abs(entryPrice - slPrice);
 
   if (slDistance <= 0) {
     log('ENTRY', `${symbol}: SL distance is zero — skipping`);
     return;
   }
 
-  let positionQty = riskAmount / slDistance;
+  const rawSlPct = slDistance / entryPrice;
+  const slPct = Math.max(rawSlPct, minSlPct); // Enforce 0.6% floor
+
+  let calculatedNotional = riskAmount / slPct;
+  let finalNotional = Math.min(calculatedNotional, maxNotionalCap);
+
+  let positionQty = finalNotional / entryPrice;
   positionQty     = roundQty(positionQty, instrInfo.qtyStep);
 
   if (positionQty < instrInfo.minQty) {
@@ -566,8 +578,47 @@ async function enterPosition(symbol, signal) {
 
 // ── Main Scan Loop ────────────────────────────────────────────────────────────
 
+/**
+ * Live Bybit Wallet Balance Fetching.
+ * Calls Bybit V5 API: restClient.getWalletBalance({ accountType: 'UNIFIED', coin: 'USDT' })
+ * Extracts totalEquity or walletBalance for USDT from the response list.
+ * Fallback: If API query fails or returns 0, default to 100.0 USDT to prevent division errors.
+ */
+async function getLiveWalletBalance() {
+  try {
+    const res = await restClient.getWalletBalance({
+      accountType: 'UNIFIED',
+      coin: 'USDT'
+    });
+
+    if (res.retCode === 0 && res.result?.list?.length > 0) {
+      const account = res.result.list[0];
+      let balance = parseFloat(account.totalEquity || account.totalWalletBalance || '0');
+
+      if (account.coin && account.coin.length > 0) {
+        const usdtCoin = account.coin.find(c => c.coin === 'USDT');
+        if (usdtCoin) {
+          balance = parseFloat(usdtCoin.equity || usdtCoin.walletBalance || balance || '0');
+        }
+      }
+
+      if (balance > 0) {
+        return balance;
+      }
+    }
+  } catch (err) {
+    log('BALANCE', `Failed to fetch live balance: ${err.message}`);
+  }
+  return 100.0; // Fallback
+}
+
 async function runCycle() {
   log('CYCLE', '═══ Cycle start ═══');
+  
+  // Dynamically fetch account balance at the start of every 3-minute scan cycle
+  const accountBalance = await getLiveWalletBalance();
+  virtualCapital = accountBalance; // keep virtualCapital in sync with live equity
+
   try {
     await monitorPositions();
   } catch (err) {
@@ -593,7 +644,13 @@ function sleep(ms) {
 async function boot() {
   logDivider();
   log('BOOT', '🚀 Wicktor Bybit Demo Bot starting…');
-  log('BOOT', `VirtualCapital: $${virtualCapital.toFixed(2)} | Risk/Trade: ${(RISK_PCT * 100).toFixed(1)}% | Leverage: ${LEVERAGE}x`);
+
+  // Fetch startup balance
+  const accountBalance = await getLiveWalletBalance();
+  virtualCapital = accountBalance;
+  console.log(`[BALANCE] Current Live Bybit USDT Equity: $${virtualCapital.toFixed(2)}`);
+
+  log('BOOT', `VirtualCapital: $${virtualCapital.toFixed(2)} | Risk/Trade: ${(RISK_PCT * 100).toFixed(2)}% | Leverage: ${LEVERAGE}x`);
   log('BOOT', `MaxPositions: ${MAX_POSITIONS} | ScanInterval: ${SCAN_INTERVAL_MS / 60000} min`);
   log('BOOT', `API Key: ${API_KEY ? API_KEY.slice(0, 4) + '...' + API_KEY.slice(-4) : 'MISSING'} | Demo: true`);
   logDivider();
