@@ -512,6 +512,28 @@ async function getLiveActivePositionCount() {
 }
 
 /**
+ * Helper to fetch currently open position symbols as a Set.
+ *
+ * @returns {Promise<Set<string>>} Set of active symbols
+ */
+async function getOpenPositionSymbols() {
+  try {
+    const res = await restClient.getPositionInfo({ category: 'linear' });
+    if (res.retCode === 0 && res.result?.list) {
+      const positions = res.result.list.filter(p => parseFloat(p.size) > 0);
+      return new Set(positions.map(p => p.symbol));
+    }
+  } catch (err) {
+    log('SCAN', `Error fetching open position symbols: ${err.message}`);
+  }
+  // Fallback to local active positions map if query fails
+  const localSymbols = [...activePositions.values()]
+    .filter(p => p.status !== 'CLOSED')
+    .map(p => p.symbol);
+  return new Set(localSymbols);
+}
+
+/**
  * Startup Position Reconciliation.
  * Synchronizes with Bybit to find active positions and populates activeSymbolsSet.
  */
@@ -863,22 +885,23 @@ async function scanForEntries() {
     log('SCAN', `  → ${q.symbol} ${q.signal.direction} | Band=${q.signal.band} | Cont=${q.signal.continuationScore} Exh=${q.signal.exhaustionScore} Rev=${q.signal.reversalScore} | Age=${q.signal.signalAgeMin}m`);
   }
 
-  for (const { symbol, signal } of qualified) {
-    // Fetch live active positions count from Bybit or local tracked state
-    const currentActiveCount = await getLiveActivePositionCount(); 
+  for (const setup of qualified) {
+    // 1. Fetch live active symbols set
+    const activeSymbols = await getOpenPositionSymbols();
 
-    if (currentActiveCount >= 20) {
-      console.log(`[CAP ENFORCED] Currently at ${currentActiveCount}/20 active positions. Skipping remaining setups.`);
-      break; // IMMEDIATELY TERMINATE THE EXECUTION LOOP
-    }
-    
-    // Duplicate symbol guard
-    const currentLivePositions = await getLivePositions();
-    if (currentLivePositions.some(p => p.symbol === symbol) || activePositions.has(symbol)) {
-      continue;
+    // 2. CHECK HARD CAP (20 MAX)
+    if (activeSymbols.size >= 20) {
+      console.log(`[CAP ENFORCED] Already at ${activeSymbols.size}/20 active positions on Bybit. Stopping order execution.`);
+      break; // Exit loop completely
     }
 
-    await enterPosition(symbol, signal);
+    // 3. CHECK DUPLICATE SYMBOL GUARD
+    if (activeSymbols.has(setup.symbol)) {
+      console.log(`[DUPLICATE SKIPPED] Position for ${setup.symbol} is already open on Bybit. Skipping.`);
+      continue; // Move to next setup
+    }
+
+    await enterPosition(setup.symbol, setup.signal);
     await sleep(500);
   }
 }
