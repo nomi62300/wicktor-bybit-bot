@@ -114,6 +114,7 @@ let virtualCapital = VIRTUAL_CAPITAL_INITIAL;
  */
 const activePositions = new Map();
 const tradeHistory = [];
+const activeSymbolsSet = new Set();
 
 // ── Logging Helpers ───────────────────────────────────────────────────────────
 
@@ -433,6 +434,33 @@ function convertToCSV(arr) {
   return [headers.join(','), ...rows.map(r => r.map(val => `"${val}"`).join(','))].join('\n');
 }
 
+app.get('/close-all', async (_req, res) => {
+  try {
+    const livePositions = await getLivePositions();
+    let closedCount = 0;
+    
+    for (const p of livePositions) {
+      try {
+        const closeSide = p.side === 'Buy' ? 'Sell' : 'Buy';
+        await placeMarketOrder(client, p.symbol, closeSide, p.size, true);
+        closedCount++;
+        
+        if (activePositions.has(p.symbol)) {
+          activePositions.delete(p.symbol);
+        }
+      } catch (err) {
+        log('CLOSE-ALL', `Error closing position for ${p.symbol}: ${err.message}`);
+      }
+    }
+    
+    activeSymbolsSet.clear();
+
+    res.json({ status: "success", closedCount });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
 app.get('/', (_req, res) => {
   res.json({ name: 'Wicktor Bybit Bot', status: 'running' });
 });
@@ -440,6 +468,39 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   log('HTTP', `Health server listening on port ${PORT}`);
 });
+
+/**
+ * Helper to fetch live positions from Bybit.
+ * Only returns positions where size > 0.
+ */
+async function getLivePositions() {
+  try {
+    const res = await restClient.getPositionInfo({ category: 'linear' });
+    if (res.retCode === 0 && res.result?.list) {
+      return res.result.list.filter(p => parseFloat(p.size) > 0);
+    }
+  } catch (err) {
+    log('SCAN', `Error fetching live positions: ${err.message}`);
+  }
+  return [];
+}
+
+/**
+ * Startup Position Reconciliation.
+ * Synchronizes with Bybit to find active positions and populates activeSymbolsSet.
+ */
+async function syncLivePositions() {
+  try {
+    const livePositions = await getLivePositions();
+    activeSymbolsSet.clear();
+    for (const p of livePositions) {
+      activeSymbolsSet.add(p.symbol);
+    }
+    log('RECONCILE', `Synced with Bybit: Found ${activeSymbolsSet.size} currently open positions on exchange.`);
+  } catch (err) {
+    log('RECONCILE', `Error in syncLivePositions: ${err.message}`);
+  }
+}
 
 // ── Position Monitor ──────────────────────────────────────────────────────────
 
@@ -703,14 +764,14 @@ async function executeExit(pos, reason, livePrice, refLevel) {
  * Enforces all filtering rules before executing an order.
  */
 async function scanForEntries() {
-  // Check position cap
-  const openCount = [...activePositions.values()].filter(p => p.status !== 'CLOSED').length;
-  if (openCount >= MAX_POSITIONS) {
-    log('SCAN', `Position cap reached (${openCount}/${MAX_POSITIONS}). Skipping scan.`);
+  // Check position cap directly on the exchange first
+  const livePositions = await getLivePositions();
+  if (livePositions.length >= 20) {
+    log('CAP REACHED', `Exchange already has ${livePositions.length} active positions (>= 20 cap). Skipping new entries.`);
     return;
   }
 
-  log('SCAN', `Starting universe scan… (${openCount} positions open)`);
+  log('SCAN', `Starting universe scan… (${livePositions.length} positions open on exchange)`);
 
   let universe;
   try {
@@ -724,8 +785,8 @@ async function scanForEntries() {
   const qualified = [];
 
   for (const symbol of universe) {
-    // Skip if already have an open position on this coin
-    if (activePositions.has(symbol)) continue;
+    // Skip if already open locally or on the exchange
+    if (activePositions.has(symbol) || livePositions.some(p => p.symbol === symbol)) continue;
 
     // Check position cap again mid-loop
     const curOpen = [...activePositions.values()].filter(p => p.status !== 'CLOSED').length;
@@ -757,9 +818,16 @@ async function scanForEntries() {
   }
 
   for (const { symbol, signal } of qualified) {
-    const nowOpen = [...activePositions.values()].filter(p => p.status !== 'CLOSED').length;
-    if (nowOpen >= MAX_POSITIONS) break;
-    if (activePositions.has(symbol)) continue;
+    // Re-fetch live positions immediately before considering ANY new entry
+    const currentLivePositions = await getLivePositions();
+    if (currentLivePositions.length >= 20) {
+      log('CAP REACHED', `Exchange already has ${currentLivePositions.length} active positions (>= 20 cap). Skipping new entries.`);
+      break;
+    }
+    // Duplicate symbol guard
+    if (currentLivePositions.some(p => p.symbol === symbol) || activePositions.has(symbol)) {
+      continue;
+    }
 
     await enterPosition(symbol, signal);
     await sleep(500);
@@ -992,6 +1060,9 @@ async function boot() {
   const accountBalance = await getLiveWalletBalance();
   virtualCapital = accountBalance;
   console.log(`[BALANCE] Current Live Bybit USDT Equity: $${virtualCapital.toFixed(2)}`);
+
+  // Run Startup reconciliation
+  await syncLivePositions();
 
   log('BOOT', `VirtualCapital: $${virtualCapital.toFixed(2)} | Risk/Trade: ${(RISK_PCT * 100).toFixed(2)}% | Leverage: ${LEVERAGE}x`);
   log('BOOT', `MaxPositions: ${MAX_POSITIONS} | ScanInterval: ${SCAN_INTERVAL_MS / 60000} min`);
