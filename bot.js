@@ -496,6 +496,22 @@ async function getLivePositions() {
 }
 
 /**
+ * Helper to fetch the number of currently active positions from the exchange.
+ *
+ * @returns {Promise<number>} count of active positions
+ */
+async function getLiveActivePositionCount() {
+  try {
+    const livePositions = await getLivePositions();
+    return livePositions.length;
+  } catch (err) {
+    log('CAP', `Error getting active position count: ${err.message}`);
+    // Fallback to local tracked count if exchange query fails
+    return [...activePositions.values()].filter(p => p.status !== 'CLOSED').length;
+  }
+}
+
+/**
  * Startup Position Reconciliation.
  * Synchronizes with Bybit to find active positions and populates activeSymbolsSet.
  */
@@ -848,13 +864,16 @@ async function scanForEntries() {
   }
 
   for (const { symbol, signal } of qualified) {
-    // Re-fetch live positions immediately before considering ANY new entry
-    const currentLivePositions = await getLivePositions();
-    if (currentLivePositions.length >= 20) {
-      log('CAP REACHED', `Exchange already has ${currentLivePositions.length} active positions (>= 20 cap). Skipping new entries.`);
-      break;
+    // Fetch live active positions count from Bybit or local tracked state
+    const currentActiveCount = await getLiveActivePositionCount(); 
+
+    if (currentActiveCount >= 20) {
+      console.log(`[CAP ENFORCED] Currently at ${currentActiveCount}/20 active positions. Skipping remaining setups.`);
+      break; // IMMEDIATELY TERMINATE THE EXECUTION LOOP
     }
+    
     // Duplicate symbol guard
+    const currentLivePositions = await getLivePositions();
     if (currentLivePositions.some(p => p.symbol === symbol) || activePositions.has(symbol)) {
       continue;
     }
