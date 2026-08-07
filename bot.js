@@ -436,9 +436,9 @@ function convertToCSV(arr) {
 }
 
 app.get('/close-all', async (_req, res) => {
+  let closedCount = 0;
   try {
     const livePositions = await getLivePositions();
-    let closedCount = 0;
     
     for (const p of livePositions) {
       try {
@@ -449,16 +449,25 @@ app.get('/close-all', async (_req, res) => {
         if (activePositions.has(p.symbol)) {
           activePositions.delete(p.symbol);
         }
+        
+        // Pause 100ms between individual close requests to prevent Bybit API rate limits
+        await new Promise(r => setTimeout(r, 100));
       } catch (err) {
         log('CLOSE-ALL', `Error closing position for ${p.symbol}: ${err.message}`);
       }
     }
     
-    activeSymbolsSet.clear();
-
-    res.json({ status: "success", closedCount });
+    res.json({
+      success: true,
+      closedCount,
+      message: "All positions closed & sync complete"
+    });
   } catch (err) {
-    res.status(500).json({ status: "error", message: err.message });
+    log('CLOSE-ALL', `Fatal error during close-all execution: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    isCycleRunning = false;
+    await syncLivePositions();
   }
 });
 
@@ -1057,25 +1066,41 @@ async function getLiveWalletBalance() {
   return 100.0; // Fallback
 }
 
-async function runCycle() {
+let isCycleRunning = false;
+
+async function runScanCycle() {
+  if (isCycleRunning) {
+    log('CYCLE', 'Scan cycle already in progress, skipping.');
+    return;
+  }
+
+  isCycleRunning = true;
   log('CYCLE', '═══ Cycle start ═══');
-  
-  // Dynamically fetch account balance at the start of every 3-minute scan cycle
-  const accountBalance = await getLiveWalletBalance();
-  virtualCapital = accountBalance; // keep virtualCapital in sync with live equity
 
   try {
-    await monitorPositions();
+    // Dynamically fetch account balance at the start of every scan cycle
+    const accountBalance = await getLiveWalletBalance();
+    virtualCapital = accountBalance; // keep virtualCapital in sync with live equity
+
+    try {
+      await monitorPositions();
+    } catch (err) {
+      log('CYCLE', 'monitorPositions error:', { error: err.message });
+    }
+    try {
+      await scanForEntries();
+    } catch (err) {
+      log('CYCLE', 'scanForEntries error:', { error: err.message });
+    }
+
+    log('CYCLE', '═══ Cycle end ═══');
+    logPnL();
   } catch (err) {
-    log('CYCLE', 'monitorPositions error:', { error: err.message });
+    log('CYCLE', 'Fatal error inside scan cycle:', { error: err.message });
+  } finally {
+    isCycleRunning = false;
+    setTimeout(runScanCycle, SCAN_INTERVAL_MS);
   }
-  try {
-    await scanForEntries();
-  } catch (err) {
-    log('CYCLE', 'scanForEntries error:', { error: err.message });
-  }
-  log('CYCLE', '═══ Cycle end ═══');
-  logPnL();
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -1111,9 +1136,10 @@ async function boot() {
     log('BOOT', `⚠️ Server time check failed (network?): ${err.message}`);
   }
 
-  // Run the first cycle immediately, then on interval
-  await runCycle();
-  setInterval(runCycle, SCAN_INTERVAL_MS);
+  log('SYSTEM', 'Self-healing scanner initialized. Scanning every 3 minutes.');
+
+  // Run the first scan cycle
+  await runScanCycle();
 }
 
 boot().catch(err => {
