@@ -127,7 +127,7 @@ async function setSymbolLeverage(client, symbol, leverage = 5) {
  * @param {boolean} [reduceOnly=false]
  * @returns {Promise<object>} Full Bybit response
  */
-async function placeMarketOrder(client, symbol, side, qty, reduceOnly = false) {
+async function placeMarketOrder(client, symbol, side, qty, reduceOnly = false, takeProfit = null, stopLoss = null) {
   const params = {
     category   : CATEGORY,
     symbol,
@@ -138,6 +138,9 @@ async function placeMarketOrder(client, symbol, side, qty, reduceOnly = false) {
     reduceOnly,
     positionIdx: 0,   // one-way mode
   };
+
+  if (takeProfit != null) params.takeProfit = String(takeProfit);
+  if (stopLoss != null) params.stopLoss = String(stopLoss);
 
   const res = await client.submitOrder(params);
 

@@ -44,6 +44,7 @@ const {
   placeMarketOrder,
   getInstrumentInfo,
   roundQty,
+  roundPrice,
 } = require('./engine/api');
 
 const { scoreSignal } = require('./engine/scoring');
@@ -506,11 +507,7 @@ async function syncLivePositions() {
 
 /**
  * Iterate all open/partial positions.
- * For each:
- *   1. Fetch live price.
- *   2. Check Jaw invalidation (immediate full exit).
- *   3. Check TP1 (1.25R) → partial close + move SL to breakeven.
- *   4. Check TP2 (2.0R) → close remaining.
+ * Synchronizes with the exchange and monitors for 1.25R partial closes.
  */
 async function monitorPositions() {
   const openPositions = [...activePositions.values()].filter(
@@ -519,42 +516,75 @@ async function monitorPositions() {
 
   if (openPositions.length === 0) return;
 
+  const livePositions = await getLivePositions();
+
   log('MONITOR', `Checking ${openPositions.length} position(s)…`);
 
   for (const pos of openPositions) {
+    const livePos = livePositions.find(p => p.symbol === pos.symbol);
+    
+    if (!livePos) {
+      // Position was closed on the exchange (e.g. hit native SL or TP)
+      log('MONITOR', `Position for ${pos.symbol} is no longer open on exchange. Reconciling...`);
+      
+      const lastPrice = await getLastPrice(pos.symbol) || pos.entryPrice;
+      let realizedPnl = (pos.side === 'Buy')
+        ? (lastPrice - pos.entryPrice) * pos.remainQty
+        : (pos.entryPrice - lastPrice) * pos.remainQty;
+      
+      let exitReason = 'STOP_LOSS_HIT';
+      
+      if (pos.status === 'PARTIAL') {
+        const hitBreakeven = Math.abs(lastPrice - pos.entryPrice) / pos.entryPrice < 0.005; // within 0.5%
+        if (hitBreakeven) {
+          exitReason = 'BREAKEVEN_HIT';
+        } else {
+          exitReason = 'TP_2.0R_FINAL';
+        }
+      } else {
+        const distToSl = Math.abs(lastPrice - pos.slPrice) / pos.entryPrice;
+        const distToTp = Math.abs(lastPrice - pos.tpPrice) / pos.entryPrice;
+        if (distToTp < distToSl) {
+          exitReason = 'TP_2.0R_FINAL';
+        }
+      }
+
+      const rMultiple = (pos.side === 'Buy' ? (lastPrice - pos.entryPrice) : (pos.entryPrice - lastPrice)) / pos.slDistance;
+      tradeHistory.push({
+        timestamp   : new Date().toISOString(),
+        symbol      : pos.symbol,
+        side        : pos.side,
+        qualityBand : pos.qualityBand || pos.band || 'WATCH',
+        timeframe   : pos.timeframe || '5M',
+        entryPrice  : pos.entryPrice,
+        exitPrice   : lastPrice,
+        exitReason  : exitReason,
+        realizedPnl : realizedPnl,
+        rMultiple   : parseFloat(rMultiple.toFixed(4))
+      });
+
+      pos.status = 'CLOSED';
+      activePositions.delete(pos.symbol);
+      log('MONITOR', `Reconciled ${pos.symbol} exit: ${exitReason} @ ${lastPrice}. PnL: $${realizedPnl.toFixed(4)}`);
+      logPnL();
+      continue;
+    }
+
     try {
-      await checkPosition(pos);
+      await checkPosition(pos, livePos);
     } catch (err) {
       log('MONITOR', `Error checking ${pos.symbol}:`, { error: err.message });
     }
   }
 }
 
-async function checkPosition(pos) {
-  const livePrice = await getLastPrice(pos.symbol);
+async function checkPosition(pos, livePos) {
+  const livePrice = parseFloat(livePos.markPrice || livePos.entryPrice || await getLastPrice(pos.symbol));
   if (!livePrice) return;
 
   const isBull = pos.side === 'Buy';
-  const sl     = pos.slPrice;
   const entry  = pos.entryPrice;
   const dist   = pos.slDistance;
-
-  // ── Jaw Invalidation ─────────────────────────────────────────────────────
-  // Re-fetch fresh candles to get latest Jaw value
-  const candles5m = await getKlines(pos.symbol, '5', 100);
-  const ha5m      = calcHeikinAshi(candles5m);
-  const jaw5m     = calcAlligatorJaw(ha5m);
-  const liveJaw   = getLatestJaw(jaw5m);
-
-  if (liveJaw != null) {
-    const jawCross = (isBull && livePrice < liveJaw) || (!isBull && livePrice > liveJaw);
-
-    if (jawCross) {
-      log('JAW-EXIT', `⚡ ${pos.symbol} price ${livePrice} crossed Jaw ${liveJaw.toFixed(4)} — immediate exit`);
-      await executeExit(pos, 'JAW_INVALIDATION', livePrice, liveJaw);
-      return;
-    }
-  }
 
   // ── TP1 Check (1.25R) ─────────────────────────────────────────────────────
   if (pos.status === 'OPEN') {
@@ -567,30 +597,7 @@ async function checkPosition(pos) {
     if (tp1Hit) {
       log('TP1', `🎯 ${pos.symbol} hit 1.25R at ${livePrice} (tp1=${tp1Price.toFixed(4)})`);
       await executePartialClose(pos, livePrice);
-      return;
     }
-  }
-
-  // ── TP2 Check (2.0R) ─────────────────────────────────────────────────────
-  if (pos.status === 'PARTIAL') {
-    const tp2Price = isBull
-      ? entry + dist * TP2_R
-      : entry - dist * TP2_R;
-
-    const tp2Hit = (isBull && livePrice >= tp2Price) || (!isBull && livePrice <= tp2Price);
-
-    if (tp2Hit) {
-      log('TP2', `🏁 ${pos.symbol} hit 2.0R at ${livePrice} (tp2=${tp2Price.toFixed(4)})`);
-      await executeFullClose(pos, 'TP2', livePrice);
-      return;
-    }
-  }
-
-  // ── SL check (safety net in case exchange SL missed) ─────────────────────
-  const slBreached = (isBull && livePrice <= sl) || (!isBull && livePrice >= sl);
-  if (slBreached) {
-    log('SL-HIT', `🛑 ${pos.symbol} SL breached at ${livePrice} (sl=${sl})`);
-    await executeExit(pos, 'STOP_LOSS', livePrice, sl);
   }
 }
 
@@ -629,6 +636,20 @@ async function executePartialClose(pos, livePrice) {
   pos.slPrice     = pos.entryPrice;   // move SL to breakeven
   pos.breakevenSet= true;
   pos.status      = 'PARTIAL';
+
+  // Update the remaining position's Stop-Loss on Bybit to Breakeven (Entry Price)
+  try {
+    const roundedSl = roundPrice(pos.entryPrice, instrInfo.tickSize);
+    await client.setTradingStop({
+      category: 'linear',
+      symbol: pos.symbol,
+      stopLoss: String(roundedSl),
+      positionIdx: 0
+    });
+    log('TP1', `Updated stopLoss to breakeven (${roundedSl}) on Bybit for ${pos.symbol}`);
+  } catch (err) {
+    log('TP1', `⚠️ Failed to update exchange stopLoss for ${pos.symbol}:`, { error: err.message });
+  }
 
   // Add to trade journal
   const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
@@ -934,10 +955,23 @@ async function enterPosition(symbol, signal) {
     return;
   }
 
-  // ── Place Market Entry Order ─────────────────────────────────────────────
+  // ── Place Market Entry Order with native SL/TP ───────────────────────────
   let order;
   try {
-    order = await placeMarketOrder(client, symbol, signal.direction, positionQty, false);
+    const isBull = signal.direction === 'Buy';
+    const tpPrice = isBull ? entryPrice + slDistance * TP2_R : entryPrice - slDistance * TP2_R;
+    const roundedSl = roundPrice(signal.slPrice, instrInfo.tickSize);
+    const roundedTp = roundPrice(tpPrice, instrInfo.tickSize);
+
+    order = await placeMarketOrder(
+      client,
+      symbol,
+      signal.direction,
+      positionQty,
+      false,
+      roundedTp,
+      roundedSl
+    );
   } catch (err) {
     log('ENTRY', `⚠️ Order placement failed for ${symbol}:`, { error: err.message });
     return;
