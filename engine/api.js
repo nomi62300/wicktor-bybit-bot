@@ -15,8 +15,11 @@ const axios = require('axios');
 const CATEGORY      = 'linear';
 const BYBIT_BASE    = 'https://api-demo.bybit.com';   // demo endpoint for public data
 
+const MIN_TURNOVER_24H = 15_000_000; // 15M USDT 24h turnover liquidity floor
+
 /**
  * Fetch the top N USDT-Perpetual symbols by 24-hour USDT volume.
+ * Filters out any coins with 24h USDT turnover below 15,000,000 USDT.
  * Uses the public tickers endpoint so no auth is needed.
  *
  * @param {number} [limit=60]
@@ -32,15 +35,23 @@ async function getTop60Symbols(limit = 60) {
 
   const tickers = res.data.result.list;
 
-  // Filter to USDT-margined perps only and sort by turnover24h descending
+  // Filter to USDT-margined perps only with 24h turnover >= 15,000,000 USDT, sorted descending
   const sorted = tickers
-    .filter(t => t.symbol.endsWith('USDT') && parseFloat(t.volume24h) > 0)
-    .sort((a, b) => parseFloat(b.turnover24h) - parseFloat(a.turnover24h))
+    .filter(t => {
+      if (!t.symbol.endsWith('USDT')) return false;
+      const turnover = parseFloat(t.turnover24h || '0');
+      const calcTurnover = parseFloat(t.volume24h || '0') * parseFloat(t.lastPrice || '0');
+      const effectiveTurnover = turnover > 0 ? turnover : calcTurnover;
+      return effectiveTurnover >= MIN_TURNOVER_24H;
+    })
+    .sort((a, b) => parseFloat(b.turnover24h || '0') - parseFloat(a.turnover24h || '0'))
     .slice(0, limit)
     .map(t => t.symbol);
 
   return sorted;
 }
+
+const getUniverse = getTop60Symbols;
 
 /**
  * Fetch OHLCV kline data for a symbol.
@@ -230,6 +241,7 @@ function countDecimals(value) {
 
 module.exports = {
   getTop60Symbols,
+  getUniverse,
   getKlines,
   getLastPrice,
   setSymbolLeverage,

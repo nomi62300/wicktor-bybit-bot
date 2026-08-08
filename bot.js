@@ -38,6 +38,7 @@ const { RestClientV5} = require('bybit-api');
 
 const {
   getTop60Symbols,
+  getUniverse,
   getKlines,
   getLastPrice,
   setSymbolLeverage,
@@ -116,6 +117,8 @@ let virtualCapital = VIRTUAL_CAPITAL_INITIAL;
 const activePositions = new Map();
 const tradeHistory = [];
 const activeSymbolsSet = new Set();
+const symbolCooldowns = new Map(); // symbol → cooldownExpiryTimestamp (30-minute lockout)
+const COOLDOWN_DURATION_MS = 30 * 60 * 1000;
 
 // ── Logging Helpers ───────────────────────────────────────────────────────────
 
@@ -186,7 +189,7 @@ app.get('/performance', (_req, res) => {
   // Exit Reason Breakdown
   const exitReasons = {
     'STOP_LOSS_HIT': 0,
-    'JAW_INVALIDATION': 0,
+    'BREAKEVEN_SL_HIT': 0,
     'TP_1.25R_PARTIAL': 0,
     'TP_2.0R_FINAL': 0
   };
@@ -378,24 +381,24 @@ app.get('/performance', (_req, res) => {
           </thead>
           <tbody>
             <tr>
-              <td>Stop Loss Hit</td>
-              <td>${exitReasons['STOP_LOSS_HIT']}</td>
-              <td>${total > 0 ? ((exitReasons['STOP_LOSS_HIT'] / total) * 100).toFixed(1) : 0}%</td>
+              <td>Stop Loss Hit (Loss Exit)</td>
+              <td>${exitReasons['STOP_LOSS_HIT'] || 0}</td>
+              <td>${total > 0 ? (((exitReasons['STOP_LOSS_HIT'] || 0) / total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Jaw Invalidation (Early Exit)</td>
-              <td>${exitReasons['JAW_INVALIDATION']}</td>
-              <td>${total > 0 ? ((exitReasons['JAW_INVALIDATION'] / total) * 100).toFixed(1) : 0}%</td>
+              <td>Breakeven SL Hit (Protected Exit)</td>
+              <td>${exitReasons['BREAKEVEN_SL_HIT'] || 0}</td>
+              <td>${total > 0 ? (((exitReasons['BREAKEVEN_SL_HIT'] || 0) / total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
               <td>Take Profit 1 (1.25R Partial)</td>
-              <td>${exitReasons['TP_1.25R_PARTIAL']}</td>
-              <td>${total > 0 ? ((exitReasons['TP_1.25R_PARTIAL'] / total) * 100).toFixed(1) : 0}%</td>
+              <td>${exitReasons['TP_1.25R_PARTIAL'] || 0}</td>
+              <td>${total > 0 ? (((exitReasons['TP_1.25R_PARTIAL'] || 0) / total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
               <td>Take Profit 2 (2.0R Final)</td>
-              <td>${exitReasons['TP_2.0R_FINAL']}</td>
-              <td>${total > 0 ? ((exitReasons['TP_2.0R_FINAL'] / total) * 100).toFixed(1) : 0}%</td>
+              <td>${exitReasons['TP_2.0R_FINAL'] || 0}</td>
+              <td>${total > 0 ? (((exitReasons['TP_2.0R_FINAL'] || 0) / total) * 100).toFixed(1) : 0}%</td>
             </tr>
           </tbody>
         </table>
@@ -449,6 +452,7 @@ app.get('/close-all', async (_req, res) => {
         if (activePositions.has(p.symbol)) {
           activePositions.delete(p.symbol);
         }
+        symbolCooldowns.set(p.symbol, Date.now() + COOLDOWN_DURATION_MS);
         
         // Pause 100ms between individual close requests to prevent Bybit API rate limits
         await new Promise(r => setTimeout(r, 100));
@@ -579,20 +583,27 @@ async function monitorPositions() {
         ? (lastPrice - pos.entryPrice) * pos.remainQty
         : (pos.entryPrice - lastPrice) * pos.remainQty;
       
-      let exitReason = 'STOP_LOSS_HIT';
+      let exitReason = realizedPnl > 0 ? 'BREAKEVEN_SL_HIT' : 'STOP_LOSS_HIT';
       
       if (pos.status === 'PARTIAL') {
-        const hitBreakeven = Math.abs(lastPrice - pos.entryPrice) / pos.entryPrice < 0.005; // within 0.5%
-        if (hitBreakeven) {
-          exitReason = 'BREAKEVEN_HIT';
-        } else {
+        const distToTp = Math.abs(lastPrice - pos.tpPrice) / pos.entryPrice;
+        const distToEntry = Math.abs(lastPrice - pos.entryPrice) / pos.entryPrice;
+        if (distToTp < distToEntry && realizedPnl > 0) {
           exitReason = 'TP_2.0R_FINAL';
+        } else if (realizedPnl > 0) {
+          exitReason = 'BREAKEVEN_SL_HIT';
+        } else {
+          exitReason = 'STOP_LOSS_HIT';
         }
       } else {
         const distToSl = Math.abs(lastPrice - pos.slPrice) / pos.entryPrice;
         const distToTp = Math.abs(lastPrice - pos.tpPrice) / pos.entryPrice;
-        if (distToTp < distToSl) {
+        if (distToTp < distToSl && realizedPnl > 0) {
           exitReason = 'TP_2.0R_FINAL';
+        } else if (realizedPnl > 0) {
+          exitReason = 'BREAKEVEN_SL_HIT';
+        } else {
+          exitReason = 'STOP_LOSS_HIT';
         }
       }
 
@@ -612,7 +623,8 @@ async function monitorPositions() {
 
       pos.status = 'CLOSED';
       activePositions.delete(pos.symbol);
-      log('MONITOR', `Reconciled ${pos.symbol} exit: ${exitReason} @ ${lastPrice}. PnL: $${realizedPnl.toFixed(4)}`);
+      symbolCooldowns.set(pos.symbol, Date.now() + COOLDOWN_DURATION_MS);
+      log('MONITOR', `Reconciled ${pos.symbol} exit: ${exitReason} @ ${lastPrice}. PnL: $${realizedPnl.toFixed(4)} (30m cooldown set)`);
       logPnL();
       continue;
     }
@@ -749,6 +761,7 @@ async function executeFullClose(pos, reason, livePrice) {
   virtualCapital += pnl;
   pos.status      = 'CLOSED';
   activePositions.delete(pos.symbol);
+  symbolCooldowns.set(pos.symbol, Date.now() + COOLDOWN_DURATION_MS);
 
   // Add to trade journal
   const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
@@ -800,11 +813,11 @@ async function executeExit(pos, reason, livePrice, refLevel) {
   virtualCapital += pnl;
   pos.status      = 'CLOSED';
   activePositions.delete(pos.symbol);
+  symbolCooldowns.set(pos.symbol, Date.now() + COOLDOWN_DURATION_MS);
 
   // Add to trade journal
-  let loggedReason = 'STOP_LOSS_HIT';
-  if (reason === 'JAW_INVALIDATION') loggedReason = 'JAW_INVALIDATION';
-  if (reason === 'STOP_LOSS') loggedReason = 'STOP_LOSS_HIT';
+  let loggedReason = pnl > 0 ? 'BREAKEVEN_SL_HIT' : 'STOP_LOSS_HIT';
+  if (reason === 'TP2') loggedReason = 'TP_2.0R_FINAL';
 
   const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
   tradeHistory.push({
@@ -853,6 +866,11 @@ async function scanForEntries() {
   const qualified = [];
 
   for (const symbol of universe) {
+    // Check 30m cooldown lockout
+    if (symbolCooldowns.has(symbol) && Date.now() < symbolCooldowns.get(symbol)) {
+      continue;
+    }
+
     // Skip if already open locally or on the exchange
     if (activePositions.has(symbol) || livePositions.some(p => p.symbol === symbol)) continue;
 
@@ -886,6 +904,12 @@ async function scanForEntries() {
   }
 
   for (const setup of qualified) {
+    // Check 30m cooldown lockout
+    if (symbolCooldowns.has(setup.symbol) && Date.now() < symbolCooldowns.get(setup.symbol)) {
+      console.log(`[COOLDOWN SKIPPED] Symbol ${setup.symbol} is in 30m cooldown lockout. Skipping.`);
+      continue;
+    }
+
     // 1. Fetch live active symbols set
     const activeSymbols = await getOpenPositionSymbols();
 
@@ -950,6 +974,25 @@ async function evaluateSymbol(symbol) {
 
   // Filter 5: SL must be valid
   if (!signal.slPrice || !signal.entryPrice) return null;
+
+  // ── Higher Timeframe (1H) Trend Alignment Guard ──────────────────────────
+  const candles1h = await getKlines(symbol, '60', 100);
+  if (!candles1h || candles1h.length < 30) return null;
+
+  const ha1h = calcHeikinAshi(candles1h);
+  const jaw1h = calcAlligatorJaw(ha1h);
+  const latestJaw1h = getLatestJaw(jaw1h);
+  if (latestJaw1h == null) return null;
+
+  const lastPrice = signal.entryPrice;
+
+  // Long entries must be ABOVE 1H Jaw line; Short entries must be BELOW 1H Jaw line
+  if (signal.direction === 'Buy' && lastPrice <= latestJaw1h) {
+    return null; // Long counter to 1H trend
+  }
+  if (signal.direction === 'Sell' && lastPrice >= latestJaw1h) {
+    return null; // Short counter to 1H trend
+  }
 
   signal.timeframe = timeframe;
   return { symbol, signal };

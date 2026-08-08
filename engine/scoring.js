@@ -64,11 +64,12 @@ const ATR_FLOOR_MULT = 0.5;
 /**
  * Main scoring function.
  *
- * @param {object[]} candles5m  Standard 5M OHLCV candles (≥ 100 bars recommended)
+ * @param {object[]} candles5m   Standard 5M OHLCV candles (≥ 100 bars recommended)
  * @param {object[]} [candles15m] Optional 15M candles for trend alignment fallback
+ * @param {object[]} [candles1h]  Optional 1H candles for higher timeframe trend alignment
  * @returns {object} Signal descriptor
  */
-function scoreSignal(candles5m, candles15m = null) {
+function scoreSignal(candles5m, candles15m = null, candles1h = null) {
   if (!candles5m || candles5m.length < 50) {
     return _nullSignal('Insufficient candle data');
   }
@@ -110,6 +111,21 @@ function scoreSignal(candles5m, candles15m = null) {
   }
 
   const isBull = primaryDirection === 'Buy';
+
+  // ── Higher Timeframe (1H) Trend Alignment Guard ────────────────────────────
+  if (candles1h && candles1h.length >= 30) {
+    const ha1h = calcHeikinAshi(candles1h);
+    const jaw1h = calcAlligatorJaw(ha1h);
+    const latestJaw1h = getLatestJaw(jaw1h);
+    if (latestJaw1h != null) {
+      if (isBull && lastPrice <= latestJaw1h) {
+        return _nullSignal('1H Trend filter: Long entry not above 1H Jaw');
+      }
+      if (!isBull && lastPrice >= latestJaw1h) {
+        return _nullSignal('1H Trend filter: Short entry not below 1H Jaw');
+      }
+    }
+  }
 
   // ── Jaw position relative to price ────────────────────────────────────────
   const jawPosition = priceVsJaw(lastPrice, jaw5m);
