@@ -157,6 +157,45 @@ app.get('/health', (_req, res) => {
   });
 });
 
+function getTradeExitCategory(exitReason) {
+  if (exitReason === 'TAKE_PROFIT_HIT' || exitReason === 'TP_2.0R_FINAL' || exitReason === 'TP2') return 'TAKE_PROFIT_HIT';
+  if (exitReason === 'PARTIAL_TP_1.25R' || exitReason === 'TP_1.25R_PARTIAL' || exitReason === 'TP1') return 'PARTIAL_TP_1.25R';
+  if (exitReason === 'BREAKEVEN_SL_HIT' || exitReason === 'BREAKEVEN_HIT') return 'BREAKEVEN_SL_HIT';
+  return 'STOP_LOSS_HIT';
+}
+
+function aggregateTradeStats(trades) {
+  const total = trades.length;
+  const wins = trades.filter(t => t.realizedPnl > 0);
+  const losses = trades.filter(t => t.realizedPnl < 0);
+  const winCount = wins.length;
+  const lossCount = losses.length;
+  const winRate = total > 0 ? ((winCount / total) * 100).toFixed(1) : '0.0';
+
+  const tpHits = trades.filter(t => getTradeExitCategory(t.exitReason) === 'TAKE_PROFIT_HIT').length;
+  const partialTpHits = trades.filter(t => getTradeExitCategory(t.exitReason) === 'PARTIAL_TP_1.25R').length;
+  const beHits = trades.filter(t => getTradeExitCategory(t.exitReason) === 'BREAKEVEN_SL_HIT').length;
+  const slHits = trades.filter(t => getTradeExitCategory(t.exitReason) === 'STOP_LOSS_HIT').length;
+
+  const winUSDT = wins.reduce((sum, t) => sum + t.realizedPnl, 0);
+  const lossUSDT = losses.reduce((sum, t) => sum + Math.abs(t.realizedPnl), 0);
+  const netPnlUSDT = winUSDT - lossUSDT;
+
+  return {
+    total,
+    winCount,
+    lossCount,
+    winRate,
+    tpHits,
+    partialTpHits,
+    beHits,
+    slHits,
+    winUSDT,
+    lossUSDT,
+    netPnlUSDT
+  };
+}
+
 app.get('/performance', async (_req, res) => {
   await syncClosedTradesFromBybit();
 
@@ -165,53 +204,11 @@ app.get('/performance', async (_req, res) => {
     return tradeTime >= resetTimestamp;
   });
 
-  const totalTrades   = filteredTrades.length;
-  const winTrades     = filteredTrades.filter(t => t.realizedPnl > 0);
-  const lossTrades    = filteredTrades.filter(t => t.realizedPnl < 0);
-  const winCount      = winTrades.length;
-  const lossCount     = lossTrades.length;
-
-  const totalWinUSDT  = winTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
-  const totalLossUSDT = lossTrades.reduce((sum, t) => sum + Math.abs(t.realizedPnl), 0);
-  const netPnlUSDT    = totalWinUSDT - totalLossUSDT;
-  const winRatePct    = totalTrades > 0 ? ((winCount / totalTrades) * 100).toFixed(1) : '0.0';
-
-  // Quality Band Splits
-  const excellentTrades = filteredTrades.filter(t => t.qualityBand === 'EXCELLENT');
-  const watchTrades = filteredTrades.filter(t => t.qualityBand === 'WATCH');
-  
-  const excellentWins = excellentTrades.filter(t => t.realizedPnl > 0).length;
-  const excellentWinRate = excellentTrades.length > 0 ? ((excellentWins / excellentTrades.length) * 100).toFixed(2) : '0.00';
-  const excellentPnl = excellentTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
-
-  const watchWins = watchTrades.filter(t => t.realizedPnl > 0).length;
-  const watchWinRate = watchTrades.length > 0 ? ((watchWins / watchTrades.length) * 100).toFixed(2) : '0.00';
-  const watchPnl = watchTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
-
-  // Timeframe Splits
-  const m5Trades = filteredTrades.filter(t => t.timeframe === '5M');
-  const m15Trades = filteredTrades.filter(t => t.timeframe === '15M');
-
-  const m5Wins = m5Trades.filter(t => t.realizedPnl > 0).length;
-  const m5WinRate = m5Trades.length > 0 ? ((m5Wins / m5Trades.length) * 100).toFixed(2) : '0.00';
-  const m5Pnl = m5Trades.reduce((sum, t) => sum + t.realizedPnl, 0);
-
-  const m15Wins = m15Trades.filter(t => t.realizedPnl > 0).length;
-  const m15WinRate = m15Trades.length > 0 ? ((m15Wins / m15Trades.length) * 100).toFixed(2) : '0.00';
-  const m15Pnl = m15Trades.reduce((sum, t) => sum + t.realizedPnl, 0);
-
-  // Exit Reason Breakdown
-  const exitReasons = {
-    'STOP_LOSS_HIT': 0,
-    'BREAKEVEN_SL_HIT': 0,
-    'TP_1.25R_PARTIAL': 0,
-    'TP_2.0R_FINAL': 0
-  };
-  filteredTrades.forEach(t => {
-    if (exitReasons[t.exitReason] !== undefined) {
-      exitReasons[t.exitReason]++;
-    }
-  });
+  const globalStats    = aggregateTradeStats(filteredTrades);
+  const excellentStats = aggregateTradeStats(filteredTrades.filter(t => (t.qualityBand || '').toUpperCase() === 'EXCELLENT'));
+  const watchStats     = aggregateTradeStats(filteredTrades.filter(t => (t.qualityBand || '').toUpperCase() === 'WATCH'));
+  const m5Stats        = aggregateTradeStats(filteredTrades.filter(t => (t.timeframe || '').toUpperCase() === '5M'));
+  const m15Stats       = aggregateTradeStats(filteredTrades.filter(t => (t.timeframe || '').toUpperCase() === '15M'));
 
   // Render HTML response with modern styling
   const html = `
@@ -229,7 +226,7 @@ app.get('/performance', async (_req, res) => {
           padding: 40px 20px;
         }
         .container {
-          max-width: 900px;
+          max-width: 1000px;
           margin: 0 auto;
         }
         h1 {
@@ -275,11 +272,15 @@ app.get('/performance', async (_req, res) => {
           border: 1px solid #30363d;
           border-radius: 6px;
           overflow: hidden;
+          font-size: 14px;
         }
         th, td {
-          padding: 12px 15px;
-          text-align: left;
+          padding: 12px 14px;
+          text-align: center;
           border-bottom: 1px solid #30363d;
+        }
+        th:first-child, td:first-child {
+          text-align: left;
         }
         th {
           background-color: #21262d;
@@ -291,9 +292,11 @@ app.get('/performance', async (_req, res) => {
         }
         .pnl-positive {
           color: #3fb950;
+          font-weight: 600;
         }
         .pnl-negative {
           color: #f85149;
+          font-weight: 600;
         }
         .btn {
           display: inline-block;
@@ -314,101 +317,130 @@ app.get('/performance', async (_req, res) => {
       <div class="container">
         <h1>Wicktor Bot Performance Analytics</h1>
 
-        <!-- Prominent Dollar Metrics & Reset Stats Box -->
-        <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
-          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 15px; margin-bottom: 15px;">
+        <!-- Top Header Banner -->
+        <div style="display: flex; justify-content: space-between; align-items: center; background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; margin-bottom: 25px;">
+          <div>
+            <span style="color: #8b949e; font-size: 14px; margin-right: 20px;">Capital Base: <strong style="color: #58a6ff; font-size: 16px;">$${ACCOUNT_SIZE_USDT.toFixed(2)} USDT</strong></span>
+            <span style="color: #8b949e; font-size: 13px;">Stats Since: <strong style="color: #c9d1d9;">${new Date(resetTimestamp).toISOString().replace('T', ' ').slice(0, 19)} UTC</strong></span>
+          </div>
+          <div>
+            <form method="POST" action="/reset-stats" style="display: inline;" onsubmit="return confirm('Are you sure you want to reset all performance stats?');">
+              <button type="submit" style="background-color: #da3633; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px; transition: background 0.2s;">Reset Stats</button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Global Performance Summary Box -->
+        <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 22px 24px; margin-bottom: 30px; box-shadow: 0 4px 14px rgba(0,0,0,0.3);">
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 15px; margin-bottom: 18px;">
             <div>
-              <span style="font-size: 16px; color: #8b949e; margin-right: 25px;">Total Trades: <strong style="color: #f0f6fc; font-size: 18px;">${totalTrades}</strong></span>
-              <span style="font-size: 16px; color: #8b949e;">Win Rate: <strong style="color: #f0f6fc; font-size: 18px;">${winRatePct}%</strong></span>
+              <span style="font-size: 15px; color: #8b949e; margin-right: 25px;">Total Trades: <strong style="color: #f0f6fc; font-size: 20px;">${globalStats.total}</strong></span>
+              <span style="font-size: 15px; color: #8b949e;">Win Rate: <strong style="color: #f0f6fc; font-size: 20px;">${globalStats.winRate}%</strong></span>
             </div>
             <div>
-              <form method="POST" action="/reset-stats" style="display: inline;" onsubmit="return confirm('Are you sure you want to reset all performance stats?');">
-                <button type="submit" style="background-color: #da3633; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px;">Reset Stats</button>
-              </form>
+              <span style="font-size: 13px; color: #8b949e;">${globalStats.winCount} Wins / ${globalStats.lossCount} Losses</span>
             </div>
           </div>
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
             <div>
-              <div style="color: #8b949e; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Total Win $</div>
-              <div style="color: #3fb950; font-size: 24px; font-weight: bold; margin-top: 4px;">+$${totalWinUSDT.toFixed(4)} USDT</div>
+              <div style="color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Total Win $</div>
+              <div style="color: #3fb950; font-size: 24px; font-weight: bold; margin-top: 4px;">+$${globalStats.winUSDT.toFixed(4)} USDT</div>
             </div>
             <div>
-              <div style="color: #8b949e; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Total Loss $</div>
-              <div style="color: #f85149; font-size: 24px; font-weight: bold; margin-top: 4px;">-$${totalLossUSDT.toFixed(4)} USDT</div>
+              <div style="color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Total Loss $</div>
+              <div style="color: #f85149; font-size: 24px; font-weight: bold; margin-top: 4px;">-$${globalStats.lossUSDT.toFixed(4)} USDT</div>
             </div>
             <div>
-              <div style="color: #8b949e; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Net PnL $</div>
-              <div style="color: ${netPnlUSDT >= 0 ? '#3fb950' : '#f85149'}; font-size: 24px; font-weight: bold; margin-top: 4px;">${netPnlUSDT >= 0 ? '+' : ''}$${netPnlUSDT.toFixed(4)} USDT</div>
+              <div style="color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Net PnL $</div>
+              <div style="color: ${globalStats.netPnlUSDT >= 0 ? '#3fb950' : '#f85149'}; font-size: 24px; font-weight: bold; margin-top: 4px;">${globalStats.netPnlUSDT >= 0 ? '+' : ''}$${globalStats.netPnlUSDT.toFixed(4)} USDT</div>
             </div>
-          </div>
-        </div>
-        
-        <div class="stats-grid">
-          <div class="card">
-            <h3>Overall Overview</h3>
-            <div class="value">${totalTrades}</div>
-            <div class="subtext">Total Executed Trades</div>
-          </div>
-          <div class="card">
-            <h3>Overall Win Rate</h3>
-            <div class="value">${winRatePct}%</div>
-            <div class="subtext">${winCount} Wins / ${lossCount} Losses</div>
-          </div>
-          <div class="card">
-            <h3>Total Realized PnL</h3>
-            <div class="value ${netPnlUSDT >= 0 ? 'pnl-positive' : 'pnl-negative'}">${netPnlUSDT >= 0 ? '+' : ''}$${netPnlUSDT.toFixed(4)}</div>
-            <div class="subtext">Accumulated USDT</div>
           </div>
         </div>
 
-        <h2>Quality Band Performance</h2>
+        <h2>Quality Band Breakdown</h2>
         <table>
           <thead>
             <tr>
               <th>Band</th>
-              <th>Trades Count</th>
+              <th>Total</th>
               <th>Win Rate</th>
-              <th>Realized PnL</th>
+              <th>TP Hits</th>
+              <th>Partial TP Hits</th>
+              <th>Breakeven Hits</th>
+              <th>SL Hits</th>
+              <th>Win $</th>
+              <th>Loss $</th>
+              <th>Net PnL $</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td><strong>EXCELLENT</strong></td>
-              <td>${excellentTrades.length}</td>
-              <td>${excellentWinRate}%</td>
-              <td class="${excellentPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${excellentPnl.toFixed(4)}</td>
+              <td><strong style="color: #58a6ff;">EXCELLENT</strong></td>
+              <td>${excellentStats.total}</td>
+              <td>${excellentStats.winRate}%</td>
+              <td>${excellentStats.tpHits}</td>
+              <td>${excellentStats.partialTpHits}</td>
+              <td>${excellentStats.beHits}</td>
+              <td>${excellentStats.slHits}</td>
+              <td class="pnl-positive">+$${excellentStats.winUSDT.toFixed(4)}</td>
+              <td class="pnl-negative">-$${excellentStats.lossUSDT.toFixed(4)}</td>
+              <td class="${excellentStats.netPnlUSDT >= 0 ? 'pnl-positive' : 'pnl-negative'}">${excellentStats.netPnlUSDT >= 0 ? '+' : ''}$${excellentStats.netPnlUSDT.toFixed(4)}</td>
             </tr>
             <tr>
-              <td><strong>WATCH</strong></td>
-              <td>${watchTrades.length}</td>
-              <td>${watchWinRate}%</td>
-              <td class="${watchPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${watchPnl.toFixed(4)}</td>
+              <td><strong style="color: #d29922;">WATCH</strong></td>
+              <td>${watchStats.total}</td>
+              <td>${watchStats.winRate}%</td>
+              <td>${watchStats.tpHits}</td>
+              <td>${watchStats.partialTpHits}</td>
+              <td>${watchStats.beHits}</td>
+              <td>${watchStats.slHits}</td>
+              <td class="pnl-positive">+$${watchStats.winUSDT.toFixed(4)}</td>
+              <td class="pnl-negative">-$${watchStats.lossUSDT.toFixed(4)}</td>
+              <td class="${watchStats.netPnlUSDT >= 0 ? 'pnl-positive' : 'pnl-negative'}">${watchStats.netPnlUSDT >= 0 ? '+' : ''}$${watchStats.netPnlUSDT.toFixed(4)}</td>
             </tr>
           </tbody>
         </table>
 
-        <h2>Timeframe Performance</h2>
+        <h2>Timeframe Breakdown</h2>
         <table>
           <thead>
             <tr>
               <th>Timeframe</th>
-              <th>Trades Count</th>
+              <th>Total</th>
               <th>Win Rate</th>
-              <th>Realized PnL</th>
+              <th>TP Hits</th>
+              <th>Partial TP Hits</th>
+              <th>Breakeven Hits</th>
+              <th>SL Hits</th>
+              <th>Win $</th>
+              <th>Loss $</th>
+              <th>Net PnL $</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td><strong>5M</strong></td>
-              <td>${m5Trades.length}</td>
-              <td>${m5WinRate}%</td>
-              <td class="${m5Pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${m5Pnl.toFixed(4)}</td>
+              <td>${m5Stats.total}</td>
+              <td>${m5Stats.winRate}%</td>
+              <td>${m5Stats.tpHits}</td>
+              <td>${m5Stats.partialTpHits}</td>
+              <td>${m5Stats.beHits}</td>
+              <td>${m5Stats.slHits}</td>
+              <td class="pnl-positive">+$${m5Stats.winUSDT.toFixed(4)}</td>
+              <td class="pnl-negative">-$${m5Stats.lossUSDT.toFixed(4)}</td>
+              <td class="${m5Stats.netPnlUSDT >= 0 ? 'pnl-positive' : 'pnl-negative'}">${m5Stats.netPnlUSDT >= 0 ? '+' : ''}$${m5Stats.netPnlUSDT.toFixed(4)}</td>
             </tr>
             <tr>
               <td><strong>15M (Fallback)</strong></td>
-              <td>${m15Trades.length}</td>
-              <td>${m15WinRate}%</td>
-              <td class="${m15Pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${m15Pnl.toFixed(4)}</td>
+              <td>${m15Stats.total}</td>
+              <td>${m15Stats.winRate}%</td>
+              <td>${m15Stats.tpHits}</td>
+              <td>${m15Stats.partialTpHits}</td>
+              <td>${m15Stats.beHits}</td>
+              <td>${m15Stats.slHits}</td>
+              <td class="pnl-positive">+$${m15Stats.winUSDT.toFixed(4)}</td>
+              <td class="pnl-negative">-$${m15Stats.lossUSDT.toFixed(4)}</td>
+              <td class="${m15Stats.netPnlUSDT >= 0 ? 'pnl-positive' : 'pnl-negative'}">${m15Stats.netPnlUSDT >= 0 ? '+' : ''}$${m15Stats.netPnlUSDT.toFixed(4)}</td>
             </tr>
           </tbody>
         </table>
@@ -424,24 +456,24 @@ app.get('/performance', async (_req, res) => {
           </thead>
           <tbody>
             <tr>
-              <td>Stop Loss Hit (Loss Exit)</td>
-              <td>${exitReasons['STOP_LOSS_HIT'] || 0}</td>
-              <td>${totalTrades > 0 ? (((exitReasons['STOP_LOSS_HIT'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
+              <td>Take Profit Hit (`TAKE_PROFIT_HIT`)</td>
+              <td>${globalStats.tpHits}</td>
+              <td>${globalStats.total > 0 ? ((globalStats.tpHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Breakeven SL Hit (Protected Exit)</td>
-              <td>${exitReasons['BREAKEVEN_SL_HIT'] || 0}</td>
-              <td>${totalTrades > 0 ? (((exitReasons['BREAKEVEN_SL_HIT'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
+              <td>Partial TP 1.25R Hit (`PARTIAL_TP_1.25R`)</td>
+              <td>${globalStats.partialTpHits}</td>
+              <td>${globalStats.total > 0 ? ((globalStats.partialTpHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Take Profit 1 (1.25R Partial)</td>
-              <td>${exitReasons['TP_1.25R_PARTIAL'] || 0}</td>
-              <td>${totalTrades > 0 ? (((exitReasons['TP_1.25R_PARTIAL'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
+              <td>Breakeven SL Hit (`BREAKEVEN_SL_HIT`)</td>
+              <td>${globalStats.beHits}</td>
+              <td>${globalStats.total > 0 ? ((globalStats.beHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Take Profit 2 (2.0R Final)</td>
-              <td>${exitReasons['TP_2.0R_FINAL'] || 0}</td>
-              <td>${totalTrades > 0 ? (((exitReasons['TP_2.0R_FINAL'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
+              <td>Stop Loss Hit (`STOP_LOSS_HIT`)</td>
+              <td>${globalStats.slHits}</td>
+              <td>${globalStats.total > 0 ? ((globalStats.slHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
           </tbody>
         </table>
@@ -648,13 +680,13 @@ async function monitorPositions() {
         ? (lastPrice - pos.entryPrice) * pos.remainQty
         : (pos.entryPrice - lastPrice) * pos.remainQty;
       
-      let exitReason = realizedPnl > 0 ? 'BREAKEVEN_SL_HIT' : 'STOP_LOSS_HIT';
+      let exitReason = 'STOP_LOSS_HIT';
       
       if (pos.status === 'PARTIAL') {
         const distToTp = Math.abs(lastPrice - pos.tpPrice) / pos.entryPrice;
         const distToEntry = Math.abs(lastPrice - pos.entryPrice) / pos.entryPrice;
         if (distToTp < distToEntry && realizedPnl > 0) {
-          exitReason = 'TP_2.0R_FINAL';
+          exitReason = 'TAKE_PROFIT_HIT';
         } else if (realizedPnl > 0) {
           exitReason = 'BREAKEVEN_SL_HIT';
         } else {
@@ -664,7 +696,7 @@ async function monitorPositions() {
         const distToSl = Math.abs(lastPrice - pos.slPrice) / pos.entryPrice;
         const distToTp = Math.abs(lastPrice - pos.tpPrice) / pos.entryPrice;
         if (distToTp < distToSl && realizedPnl > 0) {
-          exitReason = 'TP_2.0R_FINAL';
+          exitReason = 'TAKE_PROFIT_HIT';
         } else if (realizedPnl > 0) {
           exitReason = 'BREAKEVEN_SL_HIT';
         } else {
@@ -785,7 +817,7 @@ async function executePartialClose(pos, livePrice) {
     timeframe   : pos.timeframe || '5M',
     entryPrice  : pos.entryPrice,
     exitPrice   : livePrice,
-    exitReason  : 'TP_1.25R_PARTIAL',
+    exitReason  : 'PARTIAL_TP_1.25R',
     realizedPnl : pnl,
     rMultiple   : parseFloat(rMultiple.toFixed(4))
   });
@@ -838,7 +870,7 @@ async function executeFullClose(pos, reason, livePrice) {
     timeframe   : pos.timeframe || '5M',
     entryPrice  : pos.entryPrice,
     exitPrice   : livePrice,
-    exitReason  : 'TP_2.0R_FINAL',
+    exitReason  : 'TAKE_PROFIT_HIT',
     realizedPnl : pnl,
     rMultiple   : parseFloat(rMultiple.toFixed(4))
   });
@@ -882,7 +914,7 @@ async function executeExit(pos, reason, livePrice, refLevel) {
 
   // Add to trade journal
   let loggedReason = pnl > 0 ? 'BREAKEVEN_SL_HIT' : 'STOP_LOSS_HIT';
-  if (reason === 'TP2') loggedReason = 'TP_2.0R_FINAL';
+  if (reason === 'TP2') loggedReason = 'TAKE_PROFIT_HIT';
 
   const rMultiple = (pos.side === 'Buy' ? (livePrice - pos.entryPrice) : (pos.entryPrice - livePrice)) / pos.slDistance;
   tradeHistory.push({
@@ -1220,7 +1252,7 @@ async function syncClosedTradesFromBybit() {
       
       let exitReason = pnl > 0 ? 'BREAKEVEN_SL_HIT' : 'STOP_LOSS_HIT';
       if (pnl > 0 && Math.abs(exitPrice - entryPrice) / entryPrice > 0.015) {
-        exitReason = 'TP_2.0R_FINAL';
+        exitReason = 'TAKE_PROFIT_HIT';
       }
 
       const existingIndex = tradeHistory.findIndex(t => 
