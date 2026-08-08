@@ -210,12 +210,15 @@ app.get('/performance', async (_req, res) => {
   const m5Stats        = aggregateTradeStats(filteredTrades.filter(t => (t.timeframe || '').toUpperCase() === '5M'));
   const m15Stats       = aggregateTradeStats(filteredTrades.filter(t => (t.timeframe || '').toUpperCase() === '15M'));
 
+  const lastUpdated    = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+
   // Render HTML response with modern styling
   const html = `
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
+      <meta http-equiv="refresh" content="30">
       <title>Wicktor Bot Performance Journal</title>
       <style>
         body {
@@ -226,7 +229,7 @@ app.get('/performance', async (_req, res) => {
           padding: 40px 20px;
         }
         .container {
-          max-width: 1000px;
+          max-width: 1050px;
           margin: 0 auto;
         }
         h1 {
@@ -275,7 +278,7 @@ app.get('/performance', async (_req, res) => {
           font-size: 14px;
         }
         th, td {
-          padding: 12px 14px;
+          padding: 12px 12px;
           text-align: center;
           border-bottom: 1px solid #30363d;
         }
@@ -311,6 +314,37 @@ app.get('/performance', async (_req, res) => {
         .btn:hover {
           background-color: #2ea043;
         }
+        .btn-refresh {
+          background-color: #1f6feb;
+          color: #ffffff;
+          border: none;
+          padding: 8px 16px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 13px;
+          transition: background-color 0.2s;
+          margin-right: 10px;
+        }
+        .btn-refresh:hover {
+          background-color: #388bfd;
+        }
+        .btn-reset {
+          background-color: #da3633;
+          color: #ffffff;
+          border: none;
+          padding: 8px 16px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 13px;
+          text-decoration: none;
+          display: inline-block;
+          transition: background-color 0.2s;
+        }
+        .btn-reset:hover {
+          background-color: #f85149;
+        }
       </style>
     </head>
     <body>
@@ -318,15 +352,19 @@ app.get('/performance', async (_req, res) => {
         <h1>Wicktor Bot Performance Analytics</h1>
 
         <!-- Top Header Banner -->
-        <div style="display: flex; justify-content: space-between; align-items: center; background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; margin-bottom: 25px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; margin-bottom: 25px; flex-wrap: wrap; gap: 15px;">
           <div>
-            <span style="color: #8b949e; font-size: 14px; margin-right: 20px;">Capital Base: <strong style="color: #58a6ff; font-size: 16px;">$${ACCOUNT_SIZE_USDT.toFixed(2)} USDT</strong></span>
-            <span style="color: #8b949e; font-size: 13px;">Stats Since: <strong style="color: #c9d1d9;">${new Date(resetTimestamp).toISOString().replace('T', ' ').slice(0, 19)} UTC</strong></span>
+            <div style="margin-bottom: 6px;">
+              <span style="color: #8b949e; font-size: 14px; margin-right: 20px;">Capital Base: <strong style="color: #58a6ff; font-size: 16px;">$${ACCOUNT_SIZE_USDT.toFixed(2)} USDT</strong></span>
+              <span style="color: #8b949e; font-size: 13px;">Stats Since: <strong style="color: #c9d1d9;">${new Date(resetTimestamp).toISOString().replace('T', ' ').slice(0, 19)} UTC</strong></span>
+            </div>
+            <div style="color: #8b949e; font-size: 12px;">
+              Last Updated: <strong style="color: #58a6ff;">${lastUpdated}</strong> (Auto-refreshes every 30s)
+            </div>
           </div>
-          <div>
-            <form method="POST" action="/reset-stats" style="display: inline;" onsubmit="return confirm('Are you sure you want to reset all performance stats?');">
-              <button type="submit" style="background-color: #da3633; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px; transition: background 0.2s;">Reset Stats</button>
-            </form>
+          <div style="display: flex; align-items: center;">
+            <button onclick="window.location.reload();" class="btn-refresh">🔄 Refresh Data</button>
+            <a href="/reset-stats" onclick="return confirm('Reset all trade statistics to zero?');" class="btn-reset">🗑️ Reset Stats</a>
           </div>
         </div>
 
@@ -361,11 +399,11 @@ app.get('/performance', async (_req, res) => {
         <table>
           <thead>
             <tr>
-              <th>Band</th>
-              <th>Total</th>
-              <th>Win Rate</th>
-              <th>TP Hits</th>
-              <th>Partial TP Hits</th>
+              <th>Category</th>
+              <th>Total Trades</th>
+              <th>Win Rate %</th>
+              <th>Full TP Hits</th>
+              <th>Partial 1.25R Hits</th>
               <th>Breakeven Hits</th>
               <th>SL Hits</th>
               <th>Win $</th>
@@ -405,11 +443,11 @@ app.get('/performance', async (_req, res) => {
         <table>
           <thead>
             <tr>
-              <th>Timeframe</th>
-              <th>Total</th>
-              <th>Win Rate</th>
-              <th>TP Hits</th>
-              <th>Partial TP Hits</th>
+              <th>Category</th>
+              <th>Total Trades</th>
+              <th>Win Rate %</th>
+              <th>Full TP Hits</th>
+              <th>Partial 1.25R Hits</th>
               <th>Breakeven Hits</th>
               <th>SL Hits</th>
               <th>Win $</th>
