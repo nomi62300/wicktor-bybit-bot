@@ -121,6 +121,7 @@ const tradeHistory = [];
 const activeSymbolsSet = new Set();
 const symbolCooldowns = new Map(); // symbol → cooldownExpiryTimestamp (30-minute lockout)
 const COOLDOWN_DURATION_MS = 30 * 60 * 1000;
+let resetTimestamp = Date.now();
 
 // ── Logging Helpers ───────────────────────────────────────────────────────────
 
@@ -158,16 +159,26 @@ app.get('/health', (_req, res) => {
 
 app.get('/performance', async (_req, res) => {
   await syncClosedTradesFromBybit();
-  const total = tradeHistory.length;
-  
-  // Calculate total wins (PnL > 0)
-  const wins = tradeHistory.filter(t => t.realizedPnl > 0).length;
-  const overallWinRate = total > 0 ? ((wins / total) * 100).toFixed(2) : '0.00';
-  const totalPnl = tradeHistory.reduce((sum, t) => sum + t.realizedPnl, 0);
+
+  const filteredTrades = tradeHistory.filter(t => {
+    const tradeTime = new Date(t.timestamp).getTime();
+    return tradeTime >= resetTimestamp;
+  });
+
+  const totalTrades   = filteredTrades.length;
+  const winTrades     = filteredTrades.filter(t => t.realizedPnl > 0);
+  const lossTrades    = filteredTrades.filter(t => t.realizedPnl < 0);
+  const winCount      = winTrades.length;
+  const lossCount     = lossTrades.length;
+
+  const totalWinUSDT  = winTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
+  const totalLossUSDT = lossTrades.reduce((sum, t) => sum + Math.abs(t.realizedPnl), 0);
+  const netPnlUSDT    = totalWinUSDT - totalLossUSDT;
+  const winRatePct    = totalTrades > 0 ? ((winCount / totalTrades) * 100).toFixed(1) : '0.0';
 
   // Quality Band Splits
-  const excellentTrades = tradeHistory.filter(t => t.qualityBand === 'EXCELLENT');
-  const watchTrades = tradeHistory.filter(t => t.qualityBand === 'WATCH');
+  const excellentTrades = filteredTrades.filter(t => t.qualityBand === 'EXCELLENT');
+  const watchTrades = filteredTrades.filter(t => t.qualityBand === 'WATCH');
   
   const excellentWins = excellentTrades.filter(t => t.realizedPnl > 0).length;
   const excellentWinRate = excellentTrades.length > 0 ? ((excellentWins / excellentTrades.length) * 100).toFixed(2) : '0.00';
@@ -178,8 +189,8 @@ app.get('/performance', async (_req, res) => {
   const watchPnl = watchTrades.reduce((sum, t) => sum + t.realizedPnl, 0);
 
   // Timeframe Splits
-  const m5Trades = tradeHistory.filter(t => t.timeframe === '5M');
-  const m15Trades = tradeHistory.filter(t => t.timeframe === '15M');
+  const m5Trades = filteredTrades.filter(t => t.timeframe === '5M');
+  const m15Trades = filteredTrades.filter(t => t.timeframe === '15M');
 
   const m5Wins = m5Trades.filter(t => t.realizedPnl > 0).length;
   const m5WinRate = m5Trades.length > 0 ? ((m5Wins / m5Trades.length) * 100).toFixed(2) : '0.00';
@@ -196,7 +207,7 @@ app.get('/performance', async (_req, res) => {
     'TP_1.25R_PARTIAL': 0,
     'TP_2.0R_FINAL': 0
   };
-  tradeHistory.forEach(t => {
+  filteredTrades.forEach(t => {
     if (exitReasons[t.exitReason] !== undefined) {
       exitReasons[t.exitReason]++;
     }
@@ -231,7 +242,7 @@ app.get('/performance', async (_req, res) => {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
           gap: 20px;
-          margin-bottom: 40px;
+          margin-bottom: 30px;
         }
         .card {
           background-color: #161b22;
@@ -302,21 +313,50 @@ app.get('/performance', async (_req, res) => {
     <body>
       <div class="container">
         <h1>Wicktor Bot Performance Analytics</h1>
+
+        <!-- Prominent Dollar Metrics & Reset Stats Box -->
+        <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 30px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
+          <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 15px; margin-bottom: 15px;">
+            <div>
+              <span style="font-size: 16px; color: #8b949e; margin-right: 25px;">Total Trades: <strong style="color: #f0f6fc; font-size: 18px;">${totalTrades}</strong></span>
+              <span style="font-size: 16px; color: #8b949e;">Win Rate: <strong style="color: #f0f6fc; font-size: 18px;">${winRatePct}%</strong></span>
+            </div>
+            <div>
+              <form method="POST" action="/reset-stats" style="display: inline;" onsubmit="return confirm('Are you sure you want to reset all performance stats?');">
+                <button type="submit" style="background-color: #da3633; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px;">Reset Stats</button>
+              </form>
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
+            <div>
+              <div style="color: #8b949e; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Total Win $</div>
+              <div style="color: #3fb950; font-size: 24px; font-weight: bold; margin-top: 4px;">+$${totalWinUSDT.toFixed(4)} USDT</div>
+            </div>
+            <div>
+              <div style="color: #8b949e; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Total Loss $</div>
+              <div style="color: #f85149; font-size: 24px; font-weight: bold; margin-top: 4px;">-$${totalLossUSDT.toFixed(4)} USDT</div>
+            </div>
+            <div>
+              <div style="color: #8b949e; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">Net PnL $</div>
+              <div style="color: ${netPnlUSDT >= 0 ? '#3fb950' : '#f85149'}; font-size: 24px; font-weight: bold; margin-top: 4px;">${netPnlUSDT >= 0 ? '+' : ''}$${netPnlUSDT.toFixed(4)} USDT</div>
+            </div>
+          </div>
+        </div>
         
         <div class="stats-grid">
           <div class="card">
             <h3>Overall Overview</h3>
-            <div class="value">${total}</div>
+            <div class="value">${totalTrades}</div>
             <div class="subtext">Total Executed Trades</div>
           </div>
           <div class="card">
             <h3>Overall Win Rate</h3>
-            <div class="value">${overallWinRate}%</div>
-            <div class="subtext">${wins} Wins / ${total - wins} Losses</div>
+            <div class="value">${winRatePct}%</div>
+            <div class="subtext">${winCount} Wins / ${lossCount} Losses</div>
           </div>
           <div class="card">
             <h3>Total Realized PnL</h3>
-            <div class="value ${totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">$${totalPnl.toFixed(4)}</div>
+            <div class="value ${netPnlUSDT >= 0 ? 'pnl-positive' : 'pnl-negative'}">${netPnlUSDT >= 0 ? '+' : ''}$${netPnlUSDT.toFixed(4)}</div>
             <div class="subtext">Accumulated USDT</div>
           </div>
         </div>
@@ -386,22 +426,22 @@ app.get('/performance', async (_req, res) => {
             <tr>
               <td>Stop Loss Hit (Loss Exit)</td>
               <td>${exitReasons['STOP_LOSS_HIT'] || 0}</td>
-              <td>${total > 0 ? (((exitReasons['STOP_LOSS_HIT'] || 0) / total) * 100).toFixed(1) : 0}%</td>
+              <td>${totalTrades > 0 ? (((exitReasons['STOP_LOSS_HIT'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
               <td>Breakeven SL Hit (Protected Exit)</td>
               <td>${exitReasons['BREAKEVEN_SL_HIT'] || 0}</td>
-              <td>${total > 0 ? (((exitReasons['BREAKEVEN_SL_HIT'] || 0) / total) * 100).toFixed(1) : 0}%</td>
+              <td>${totalTrades > 0 ? (((exitReasons['BREAKEVEN_SL_HIT'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
               <td>Take Profit 1 (1.25R Partial)</td>
               <td>${exitReasons['TP_1.25R_PARTIAL'] || 0}</td>
-              <td>${total > 0 ? (((exitReasons['TP_1.25R_PARTIAL'] || 0) / total) * 100).toFixed(1) : 0}%</td>
+              <td>${totalTrades > 0 ? (((exitReasons['TP_1.25R_PARTIAL'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
               <td>Take Profit 2 (2.0R Final)</td>
               <td>${exitReasons['TP_2.0R_FINAL'] || 0}</td>
-              <td>${total > 0 ? (((exitReasons['TP_2.0R_FINAL'] || 0) / total) * 100).toFixed(1) : 0}%</td>
+              <td>${totalTrades > 0 ? (((exitReasons['TP_2.0R_FINAL'] || 0) / totalTrades) * 100).toFixed(1) : 0}%</td>
             </tr>
           </tbody>
         </table>
@@ -421,8 +461,29 @@ app.get('/trades.csv', async (_req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename=wicktor_trades.csv');
   
-  const csvData = convertToCSV(tradeHistory);
+  const filtered = tradeHistory.filter(t => new Date(t.timestamp).getTime() >= resetTimestamp);
+  const csvData = convertToCSV(filtered.length > 0 ? filtered : tradeHistory);
   res.send(csvData);
+});
+
+app.post('/reset-stats', (_req, res) => {
+  resetTimestamp = Date.now();
+  tradeHistory.length = 0;
+  log('STATS', `Performance statistics reset at ${new Date(resetTimestamp).toISOString()}`);
+  if (_req.headers.accept && _req.headers.accept.includes('text/html')) {
+    return res.redirect('/performance');
+  }
+  res.json({ status: "success", message: "Trade statistics reset to zero." });
+});
+
+app.get('/reset-stats', (_req, res) => {
+  resetTimestamp = Date.now();
+  tradeHistory.length = 0;
+  log('STATS', `Performance statistics reset at ${new Date(resetTimestamp).toISOString()}`);
+  if (_req.headers.accept && _req.headers.accept.includes('text/html')) {
+    return res.redirect('/performance');
+  }
+  res.json({ status: "success", message: "Trade statistics reset to zero." });
 });
 
 function convertToCSV(arr) {

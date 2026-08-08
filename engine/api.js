@@ -36,12 +36,15 @@ async function getTop60Symbols(limit = 60) {
 
   const tickers = res.data.result.list;
 
-  // Filter to USDT crypto perpetual contracts only (exclude dated futures, indices, tokens)
+  const NON_CRYPTO_PREFIXES = ['XAU', 'XAG', 'CL', 'OIL', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'DXY', 'SPX', 'NDX', 'DJI'];
+
+  // Filter to USDT crypto perpetual contracts only (exclude dated futures, indices, tokens, commodities)
   const sorted = tickers
     .filter(t => {
       const sym = t.symbol;
       if (!sym.endsWith('USDT')) return false;
       if (sym.includes('-') || sym.includes('_') || sym.includes('INDEX')) return false;
+      if (NON_CRYPTO_PREFIXES.some(prefix => sym.startsWith(prefix))) return false;
       const lastPrice = parseFloat(t.lastPrice || '0');
       if (lastPrice <= 0) return false;
 
