@@ -494,22 +494,22 @@ app.get('/performance', async (_req, res) => {
           </thead>
           <tbody>
             <tr>
-              <td>Take Profit Hit (`TAKE_PROFIT_HIT`)</td>
+              <td>Take Profit Hit ('TAKE_PROFIT_HIT')</td>
               <td>${globalStats.tpHits}</td>
               <td>${globalStats.total > 0 ? ((globalStats.tpHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Partial TP 1.25R Hit (`PARTIAL_TP_1.25R`)</td>
+              <td>Partial TP 1.25R Hit ('PARTIAL_TP_1.25R')</td>
               <td>${globalStats.partialTpHits}</td>
               <td>${globalStats.total > 0 ? ((globalStats.partialTpHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Breakeven SL Hit (`BREAKEVEN_SL_HIT`)</td>
+              <td>Breakeven SL Hit ('BREAKEVEN_SL_HIT')</td>
               <td>${globalStats.beHits}</td>
               <td>${globalStats.total > 0 ? ((globalStats.beHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
             <tr>
-              <td>Stop Loss Hit (`STOP_LOSS_HIT`)</td>
+              <td>Stop Loss Hit ('STOP_LOSS_HIT')</td>
               <td>${globalStats.slHits}</td>
               <td>${globalStats.total > 0 ? ((globalStats.slHits / globalStats.total) * 100).toFixed(1) : 0}%</td>
             </tr>
