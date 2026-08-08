@@ -235,7 +235,7 @@ function scoreSignal(candles5m, candles15m = null, candles1h = null) {
 
   // ── SL Level Calculation ──────────────────────────────────────────────────
   // Anchor: Jaw line, with ATR floor enforcement.
-  const atrFloor = lastATR * ATR_FLOOR_MULT;
+  const atrFloor = Math.max(lastATR * ATR_FLOOR_MULT, lastPrice * 0.006);
 
   let slPrice;
   if (isBull) {
@@ -243,8 +243,8 @@ function scoreSignal(candles5m, candles15m = null, candles1h = null) {
     const jawSl = lastJaw;
     const fracSl = lastDownFractal ?? jawSl;
     slPrice = Math.min(jawSl, fracSl);
-    // ATR floor: ensure SL is at least ATR_FLOOR away from entry
-    if (lastPrice - slPrice < atrFloor) {
+    // Enforce strictly lower than entry price and ATR floor
+    if (slPrice >= lastPrice || (lastPrice - slPrice < atrFloor)) {
       slPrice = lastPrice - atrFloor;
     }
   } else {
@@ -252,7 +252,8 @@ function scoreSignal(candles5m, candles15m = null, candles1h = null) {
     const jawSl = lastJaw;
     const fracSl = lastUpFractal ?? jawSl;
     slPrice = Math.max(jawSl, fracSl);
-    if (slPrice - lastPrice < atrFloor) {
+    // Enforce strictly higher than entry price and ATR floor
+    if (slPrice <= lastPrice || (slPrice - lastPrice < atrFloor)) {
       slPrice = lastPrice + atrFloor;
     }
   }

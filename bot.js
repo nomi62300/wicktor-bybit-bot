@@ -46,6 +46,7 @@ const {
   getInstrumentInfo,
   roundQty,
   roundPrice,
+  getClosedPnL,
 } = require('./engine/api');
 
 const { scoreSignal } = require('./engine/scoring');
@@ -75,7 +76,8 @@ const restClient = new RestClientV5({
 const client = restClient;
 
 // ── Trading Parameters ────────────────────────────────────────────────────────
-const VIRTUAL_CAPITAL_INITIAL = 100.0;        // USDT
+const ACCOUNT_SIZE_USDT       = parseFloat(process.env.INTENDED_ACCOUNT_SIZE_USDT) || 100.0;
+const VIRTUAL_CAPITAL_INITIAL = ACCOUNT_SIZE_USDT; // USDT
 const RISK_PCT                = 0.0015;        // 0.15% risk per trade
 const LEVERAGE                = 5;            // 5x forced leverage
 const MAX_POSITIONS           = 20;           // max concurrent open positions
@@ -90,7 +92,7 @@ const SIGNAL_MAX_AGE_MIN      = 20;           // max signal age in minutes
 const ALLOWED_BANDS           = new Set(['EXCELLENT', 'WATCH']);
 
 // ── Virtual Capital State ─────────────────────────────────────────────────────
-let virtualCapital = VIRTUAL_CAPITAL_INITIAL;
+let virtualCapital = ACCOUNT_SIZE_USDT;
 
 /**
  * Active positions map: symbol → positionState
@@ -154,7 +156,8 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.get('/performance', (_req, res) => {
+app.get('/performance', async (_req, res) => {
+  await syncClosedTradesFromBybit();
   const total = tradeHistory.length;
   
   // Calculate total wins (PnL > 0)
@@ -413,7 +416,8 @@ app.get('/performance', (_req, res) => {
   res.send(html);
 });
 
-app.get('/trades.csv', (_req, res) => {
+app.get('/trades.csv', async (_req, res) => {
+  await syncClosedTradesFromBybit();
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename=wicktor_trades.csv');
   
@@ -1020,15 +1024,13 @@ async function enterPosition(symbol, signal) {
     return;
   }
 
-  // ── Order Size Calculation ───────────────────────────────────────────────
-  const accountBalance = virtualCapital;
-  const riskAmount     = accountBalance * RISK_PCT;           // 0.15% risk per trade
-  const maxNotionalCap = accountBalance * 0.12;               // 12% max position value cap per coin
-  const minSlPct       = 0.006;                              // 0.6% minimum stop loss distance floor
+  // ── Order Size Calculation off ACCOUNT_SIZE_USDT ──────────────────────────
+  const riskAmountUSDT     = ACCOUNT_SIZE_USDT * 0.0015; // exactly 0.15 USDT for 100 USDT base
+  const maxNotionalCapUSDT = ACCOUNT_SIZE_USDT * 0.12;   // max 12.00 USDT position value per coin
+  const minSlPct           = 0.006;                     // 0.6% minimum stop loss distance floor
 
   const entryPrice = signal.entryPrice;
-  const slPrice    = signal.slPrice;
-  const slDistance = Math.abs(entryPrice - slPrice);
+  const slDistance = Math.abs(signal.entryPrice - signal.slPrice);
 
   if (slDistance <= 0) {
     log('ENTRY', `${symbol}: SL distance is zero — skipping`);
@@ -1038,8 +1040,8 @@ async function enterPosition(symbol, signal) {
   const rawSlPct = slDistance / entryPrice;
   const slPct = Math.max(rawSlPct, minSlPct); // Enforce 0.6% floor
 
-  let calculatedNotional = riskAmount / slPct;
-  let finalNotional = Math.min(calculatedNotional, maxNotionalCap);
+  let calculatedNotional = riskAmountUSDT / slPct;
+  let finalNotional = Math.min(calculatedNotional, maxNotionalCapUSDT);
 
   let positionQty = finalNotional / entryPrice;
   positionQty     = roundQty(positionQty, instrInfo.qtyStep);
@@ -1049,13 +1051,35 @@ async function enterPosition(symbol, signal) {
     return;
   }
 
+  // ── Strict Directional SL / TP Math & Safety Assertions ──────────────────
+  const side = signal.direction;
+  let slPrice, tpPrice1, tpPrice2;
+
+  if (side === 'Buy') {
+    slPrice  = entryPrice - slDistance;
+    tpPrice1 = entryPrice + (slDistance * 1.25);
+    tpPrice2 = entryPrice + (slDistance * 2.0);
+
+    // Directional Safety Assertions
+    if (slPrice >= entryPrice) throw new Error(`Invalid Long SL: ${slPrice} must be < entry ${entryPrice}`);
+    if (tpPrice1 <= entryPrice) throw new Error(`Invalid Long TP: ${tpPrice1} must be > entry ${entryPrice}`);
+  } else if (side === 'Sell') {
+    slPrice  = entryPrice + slDistance;
+    tpPrice1 = entryPrice - (slDistance * 1.25);
+    tpPrice2 = entryPrice - (slDistance * 2.0);
+
+    // Directional Safety Assertions
+    if (slPrice <= entryPrice) throw new Error(`Invalid Short SL: ${slPrice} must be > entry ${entryPrice}`);
+    if (tpPrice1 >= entryPrice) throw new Error(`Invalid Short TP: ${tpPrice1} must be < entry ${entryPrice}`);
+  } else {
+    throw new Error(`Invalid side for order: ${side}`);
+  }
+
   // ── Place Market Entry Order with native SL/TP ───────────────────────────
   let order;
   try {
-    const isBull = signal.direction === 'Buy';
-    const tpPrice = isBull ? entryPrice + slDistance * TP2_R : entryPrice - slDistance * TP2_R;
-    const roundedSl = roundPrice(signal.slPrice, instrInfo.tickSize);
-    const roundedTp = roundPrice(tpPrice, instrInfo.tickSize);
+    const roundedSl = roundPrice(slPrice, instrInfo.tickSize);
+    const roundedTp = roundPrice(tpPrice2, instrInfo.tickSize);
 
     order = await placeMarketOrder(
       client,
@@ -1077,17 +1101,17 @@ async function enterPosition(symbol, signal) {
     side            : signal.direction,
     qualityBand     : signal.band,
     timeframe       : signal.timeframe || '5M',
-    entryPrice      : signal.entryPrice,
+    entryPrice      : entryPrice,
     entryTime       : Date.now(),
-    slPrice         : signal.slPrice,
-    tpPrice         : parseFloat((signal.entryPrice + (signal.direction === 'Buy' ? 1 : -1) * slDistance * TP2_R).toFixed(6)),
+    slPrice         : slPrice,
+    tpPrice         : tpPrice2,
     
     // Existing tracking fields:
     jawValue        : signal.jawValue,
     slDistance,
     totalQty        : positionQty,
     remainQty       : positionQty,
-    riskAmount,
+    riskAmount      : riskAmountUSDT,
     status          : 'OPEN',
     band            : signal.band,
     confidence      : signal.confidence,
@@ -1098,6 +1122,7 @@ async function enterPosition(symbol, signal) {
   };
 
   activePositions.set(symbol, posState);
+  log('ENTRY', `✅ Placed ${symbol} ${signal.direction} qty=${positionQty} ($${finalNotional.toFixed(2)}) SL=${slPrice} TP2=${tpPrice2}`);
 
   log('ENTRY', `✅ Entered ${symbol}`, {
     orderId   : order.orderId,
@@ -1118,37 +1143,49 @@ async function enterPosition(symbol, signal) {
 // ── Main Scan Loop ────────────────────────────────────────────────────────────
 
 /**
- * Live Bybit Wallet Balance Fetching.
- * Calls Bybit V5 API: restClient.getWalletBalance({ accountType: 'UNIFIED', coin: 'USDT' })
- * Extracts totalEquity or walletBalance for USDT from the response list.
- * Fallback: If API query fails or returns 0, default to 100.0 USDT to prevent division errors.
+ * Pull trade logs directly from Bybit's closed PnL API.
  */
-async function getLiveWalletBalance() {
+async function syncClosedTradesFromBybit() {
   try {
-    const res = await restClient.getWalletBalance({
-      accountType: 'UNIFIED',
-      coin: 'USDT'
-    });
+    const closedList = await getClosedPnL(client, undefined, 100);
+    if (!Array.isArray(closedList) || closedList.length === 0) return;
 
-    if (res.retCode === 0 && res.result?.list?.length > 0) {
-      const account = res.result.list[0];
-      let balance = parseFloat(account.totalEquity || account.totalWalletBalance || '0');
-
-      if (account.coin && account.coin.length > 0) {
-        const usdtCoin = account.coin.find(c => c.coin === 'USDT');
-        if (usdtCoin) {
-          balance = parseFloat(usdtCoin.equity || usdtCoin.walletBalance || balance || '0');
-        }
+    for (const record of closedList) {
+      const closedTime = new Date(parseInt(record.updatedTime || record.createdTime)).toISOString();
+      const pnl = parseFloat(record.closedPnl || '0');
+      const entryPrice = parseFloat(record.avgEntryPrice || '0');
+      const exitPrice = parseFloat(record.avgExitPrice || record.orderPrice || '0');
+      const side = record.side === 'Buy' ? 'Buy' : 'Sell';
+      
+      let exitReason = pnl > 0 ? 'BREAKEVEN_SL_HIT' : 'STOP_LOSS_HIT';
+      if (pnl > 0 && Math.abs(exitPrice - entryPrice) / entryPrice > 0.015) {
+        exitReason = 'TP_2.0R_FINAL';
       }
 
-      if (balance > 0) {
-        return balance;
+      const existingIndex = tradeHistory.findIndex(t => 
+        (t.orderId && t.orderId === record.orderId) ||
+        (t.symbol === record.symbol && Math.abs(new Date(t.timestamp).getTime() - parseInt(record.updatedTime || record.createdTime)) < 30000)
+      );
+
+      if (existingIndex === -1) {
+        tradeHistory.push({
+          orderId     : record.orderId,
+          timestamp   : closedTime,
+          symbol      : record.symbol,
+          side        : side,
+          qualityBand : 'EXCELLENT',
+          timeframe   : '5M',
+          entryPrice  : entryPrice,
+          exitPrice   : exitPrice,
+          exitReason  : exitReason,
+          realizedPnl : pnl,
+          rMultiple   : parseFloat((pnl / (ACCOUNT_SIZE_USDT * 0.0015)).toFixed(4))
+        });
       }
     }
   } catch (err) {
-    log('BALANCE', `Failed to fetch live balance: ${err.message}`);
+    log('SYNC-PNL', `Failed to sync closed PnL from Bybit: ${err.message}`);
   }
-  return 100.0; // Fallback
 }
 
 let isCycleRunning = false;
@@ -1163,10 +1200,11 @@ async function runScanCycle() {
   log('CYCLE', '═══ Cycle start ═══');
 
   try {
-    // Dynamically fetch account balance at the start of every scan cycle
-    const accountBalance = await getLiveWalletBalance();
-    virtualCapital = accountBalance; // keep virtualCapital in sync with live equity
-
+    try {
+      await syncClosedTradesFromBybit();
+    } catch (err) {
+      log('CYCLE', 'syncClosedTradesFromBybit error:', { error: err.message });
+    }
     try {
       await monitorPositions();
     } catch (err) {
@@ -1199,19 +1237,14 @@ function sleep(ms) {
 async function boot() {
   logDivider();
   log('BOOT', '🚀 Wicktor Bybit Demo Bot starting…');
-
-  // Fetch startup balance
-  const accountBalance = await getLiveWalletBalance();
-  virtualCapital = accountBalance;
-  console.log(`[BALANCE] Current Live Bybit USDT Equity: $${virtualCapital.toFixed(2)}`);
+  log('BOOT', `Capital Base: $${ACCOUNT_SIZE_USDT.toFixed(2)} (USDT) | Risk/Trade: $${(ACCOUNT_SIZE_USDT * 0.0015).toFixed(2)} (0.15%) | MaxNotionalCap: $${(ACCOUNT_SIZE_USDT * 0.12).toFixed(2)} (12%)`);
+  log('BOOT', `Leverage: ${LEVERAGE}x | MaxPositions: ${MAX_POSITIONS} | ScanInterval: ${SCAN_INTERVAL_MS / 60000} min`);
+  log('BOOT', `API Key: ${API_KEY ? API_KEY.slice(0, 4) + '...' + API_KEY.slice(-4) : 'MISSING'} | Demo: true`);
+  logDivider();
 
   // Run Startup reconciliation
   await syncLivePositions();
-
-  log('BOOT', `VirtualCapital: $${virtualCapital.toFixed(2)} | Risk/Trade: ${(RISK_PCT * 100).toFixed(2)}% | Leverage: ${LEVERAGE}x`);
-  log('BOOT', `MaxPositions: ${MAX_POSITIONS} | ScanInterval: ${SCAN_INTERVAL_MS / 60000} min`);
-  log('BOOT', `API Key: ${API_KEY ? API_KEY.slice(0, 4) + '...' + API_KEY.slice(-4) : 'MISSING'} | Demo: true`);
-  logDivider();
+  await syncClosedTradesFromBybit();
 
   // Test connectivity
   try {

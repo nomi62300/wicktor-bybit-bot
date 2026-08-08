@@ -18,7 +18,8 @@ const BYBIT_BASE    = 'https://api-demo.bybit.com';   // demo endpoint for publi
 const MIN_TURNOVER_24H = 15_000_000; // 15M USDT 24h turnover liquidity floor
 
 /**
- * Fetch the top N USDT-Perpetual symbols by 24-hour USDT volume.
+ * Fetch the top N USDT crypto perpetual symbols by 24-hour USDT volume.
+ * Restricts universe to linear crypto perpetual contracts only.
  * Filters out any coins with 24h USDT turnover below 15,000,000 USDT.
  * Uses the public tickers endpoint so no auth is needed.
  *
@@ -35,12 +36,17 @@ async function getTop60Symbols(limit = 60) {
 
   const tickers = res.data.result.list;
 
-  // Filter to USDT-margined perps only with 24h turnover >= 15,000,000 USDT, sorted descending
+  // Filter to USDT crypto perpetual contracts only (exclude dated futures, indices, tokens)
   const sorted = tickers
     .filter(t => {
-      if (!t.symbol.endsWith('USDT')) return false;
+      const sym = t.symbol;
+      if (!sym.endsWith('USDT')) return false;
+      if (sym.includes('-') || sym.includes('_') || sym.includes('INDEX')) return false;
+      const lastPrice = parseFloat(t.lastPrice || '0');
+      if (lastPrice <= 0) return false;
+
       const turnover = parseFloat(t.turnover24h || '0');
-      const calcTurnover = parseFloat(t.volume24h || '0') * parseFloat(t.lastPrice || '0');
+      const calcTurnover = parseFloat(t.volume24h || '0') * lastPrice;
       const effectiveTurnover = turnover > 0 ? turnover : calcTurnover;
       return effectiveTurnover >= MIN_TURNOVER_24H;
     })
@@ -239,6 +245,24 @@ function countDecimals(value) {
   return idx === -1 ? 0 : str.length - idx - 1;
 }
 
+/**
+ * Fetch closed PnL trade records directly from Bybit V5 API.
+ *
+ * @param {object} client   RestClientV5 instance
+ * @param {string} [symbol] Optional symbol filter
+ * @param {number} [limit=100] Max records to return
+ * @returns {Promise<Array>}
+ */
+async function getClosedPnL(client, symbol = undefined, limit = 100) {
+  const params = { category: CATEGORY, limit };
+  if (symbol) params.symbol = symbol;
+  const res = await client.getClosedPnL(params);
+  if (res.retCode !== 0) {
+    throw new Error(`getClosedPnL error: ${res.retMsg}`);
+  }
+  return res.result?.list || [];
+}
+
 module.exports = {
   getTop60Symbols,
   getUniverse,
@@ -250,4 +274,5 @@ module.exports = {
   getInstrumentInfo,
   roundQty,
   roundPrice,
+  getClosedPnL,
 };
